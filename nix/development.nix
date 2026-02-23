@@ -77,6 +77,7 @@ in {
         pythonForRepo
         yarn
         nodejs
+        yt-dlp-light
       ];
 
       shellHook = let icon = "f1c0";

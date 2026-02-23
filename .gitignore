@@ -174,3 +174,6 @@ cython_debug/
 # node
 node_modules/
 dist/
+
+# subs
+bilibili_subs
