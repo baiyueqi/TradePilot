@@ -1,44 +1,49 @@
 """交易计划 CRUD + 评估接口"""
 import json
+
 from fastapi import APIRouter
 from pydantic import BaseModel
-from typing import Optional
-from tradepilot.db import get_conn
-from tradepilot.data.mock_provider import MockProvider
-from tradepilot.analysis.technical import analyze_stock
-from tradepilot.analysis.valuation import analyze_valuation
-from tradepilot.analysis.fund_flow import analyze_etf_flow, analyze_northbound, analyze_margin, compute_market_sentiment
+
+from tradepilot.analysis.fund_flow import analyze_etf_flow, analyze_margin, analyze_northbound, compute_market_sentiment
+from tradepilot.analysis.risk import evaluate_stop_loss, evaluate_take_profit
 from tradepilot.analysis.sector_rotation import analyze_sectors
 from tradepilot.analysis.signal import compute_composite_score
-from tradepilot.analysis.risk import evaluate_stop_loss, evaluate_take_profit
+from tradepilot.analysis.technical import analyze_stock
+from tradepilot.analysis.valuation import analyze_valuation
+from tradepilot.data import get_provider
+from tradepilot.db import get_conn
 
 router = APIRouter()
-_provider = MockProvider()
+
+
+def _get_provider():
+    return get_provider()
 
 
 class PlanCreate(BaseModel):
     stock_code: str
     stock_name: str
-    entry_target_price: Optional[float] = None
-    entry_quantity: Optional[int] = None
-    entry_reason: Optional[str] = None
+    entry_target_price: float | None = None
+    entry_quantity: int | None = None
+    entry_reason: str | None = None
     stop_loss_pct: float = -10
     take_profit_pct: float = 30
 
 
 class PlanStatusUpdate(BaseModel):
     status: str
-    entry_actual_price: Optional[float] = None
-    entry_triggered_at: Optional[str] = None
+    entry_actual_price: float | None = None
+    entry_triggered_at: str | None = None
 
 
 def _evaluate_stock(stock_code: str) -> dict:
     """对一只股票做全面评估，返回建仓建议。"""
-    kline = _provider.get_stock_daily(stock_code, "2024-01-01", "2025-12-31")
-    valuation_df = _provider.get_stock_valuation(stock_code, "2024-01-01", "2025-12-31")
-    sector_df = _provider.get_sector_data("2024-01-01", "2025-12-31")
-    nb_df = _provider.get_northbound_flow("2024-01-01", "2025-12-31")
-    margin_df = _provider.get_margin_data("2024-01-01", "2025-12-31")
+    provider = _get_provider()
+    kline = provider.get_stock_daily(stock_code, "2024-01-01", "2025-12-31")
+    valuation_df = provider.get_stock_valuation(stock_code, "2024-01-01", "2025-12-31")
+    sector_df = provider.get_sector_data("2024-01-01", "2025-12-31")
+    nb_df = provider.get_northbound_flow("2024-01-01", "2025-12-31")
+    margin_df = provider.get_margin_data("2024-01-01", "2025-12-31")
 
     # 技术分析
     tech = analyze_stock(kline)
@@ -50,7 +55,7 @@ def _evaluate_stock(stock_code: str) -> dict:
     # 资金面
     etf_results = {}
     for code in ["510050", "510300", "510500", "512100"]:
-        etf_df = _provider.get_etf_flow(code, "2024-01-01", "2025-12-31")
+        etf_df = provider.get_etf_flow(code, "2024-01-01", "2025-12-31")
         etf_results.update(analyze_etf_flow(etf_df))
     nb_result = analyze_northbound(nb_df)
     margin_result = analyze_margin(margin_df)
@@ -60,9 +65,8 @@ def _evaluate_stock(stock_code: str) -> dict:
     sector_result = analyze_sectors(sector_df)
     sector_position = None
     # 简化: 不知道个股属于哪个板块，暂不标记
-    for h in sector_result.get("high_positions", []):
+    if sector_result.get("high_positions"):
         sector_position = "high"
-        break
 
     # 综合评分
     composite = compute_composite_score(all_tech_signals, val, sentiment, sector_position)
@@ -116,7 +120,7 @@ def evaluate(stock_code: str):
 
 
 @router.get("/list")
-def list_plans(status: Optional[str] = None):
+def list_plans(status: str | None = None):
     conn = get_conn()
     if status:
         rows = conn.execute("SELECT * FROM trade_plan WHERE status = ? ORDER BY created_at DESC", [status]).fetchdf()
@@ -182,26 +186,26 @@ def monitor_plan(plan_id: int):
     if plan["status"] != "active" or not plan.get("entry_actual_price"):
         return {"plan": plan, "stop_loss": None, "take_profit": None}
 
-    kline = _provider.get_stock_daily(plan["stock_code"], "2024-01-01", "2025-12-31")
+    provider = _get_provider()
+    kline = provider.get_stock_daily(plan["stock_code"], "2024-01-01", "2025-12-31")
     current_price = float(kline["close"].iloc[-1])
 
     # 获取市场情绪和板块位置，传入止盈评估
-    nb_df = _provider.get_northbound_flow("2024-01-01", "2025-12-31")
-    margin_df = _provider.get_margin_data("2024-01-01", "2025-12-31")
+    nb_df = provider.get_northbound_flow("2024-01-01", "2025-12-31")
+    margin_df = provider.get_margin_data("2024-01-01", "2025-12-31")
     etf_results = {}
     for code in ["510050", "510300", "510500", "512100"]:
-        etf_df = _provider.get_etf_flow(code, "2024-01-01", "2025-12-31")
+        etf_df = provider.get_etf_flow(code, "2024-01-01", "2025-12-31")
         etf_results.update(analyze_etf_flow(etf_df))
     nb_result = analyze_northbound(nb_df)
     margin_result = analyze_margin(margin_df)
     sentiment = compute_market_sentiment(etf_results, nb_result, margin_result)
 
-    sector_df = _provider.get_sector_data("2024-01-01", "2025-12-31")
+    sector_df = provider.get_sector_data("2024-01-01", "2025-12-31")
     sector_result = analyze_sectors(sector_df)
     sector_position = None
-    for h in sector_result.get("high_positions", []):
+    if sector_result.get("high_positions"):
         sector_position = "high"
-        break
 
     sl = evaluate_stop_loss(plan["entry_actual_price"], current_price, plan["stop_loss_pct"], kline)
     tp = evaluate_take_profit(plan["entry_actual_price"], current_price, plan["take_profit_pct"], kline, sentiment, sector_position)

@@ -34,6 +34,8 @@ def _gen_ohlcv(dates: pd.DatetimeIndex, base_price: float) -> pd.DataFrame:
 
 
 class MockProvider(DataProvider):
+    """Generate deterministic mock market data for local development."""
+
     def get_stock_daily(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         dates = pd.bdate_range(start_date, end_date)
         base = _RNG.uniform(10, 200)
@@ -41,6 +43,48 @@ class MockProvider(DataProvider):
         df["stock_code"] = stock_code
         df["turnover"] = _RNG.uniform(0.5, 10.0, len(dates))
         return df
+
+    def get_stock_weekly(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        df = self.get_stock_daily(stock_code, start_date, end_date).copy()
+        df["date"] = pd.to_datetime(df["date"])
+        weekly = (
+            df.set_index("date")
+            .resample("W-FRI")
+            .agg({
+                "stock_code": "last",
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+                "amount": "sum",
+                "turnover": "mean",
+            })
+            .dropna()
+            .reset_index()
+        )
+        return weekly
+
+    def get_stock_monthly(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        df = self.get_stock_daily(stock_code, start_date, end_date).copy()
+        df["date"] = pd.to_datetime(df["date"])
+        monthly = (
+            df.set_index("date")
+            .resample("ME")
+            .agg({
+                "stock_code": "last",
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+                "amount": "sum",
+                "turnover": "mean",
+            })
+            .dropna()
+            .reset_index()
+        )
+        return monthly
 
     def get_index_daily(self, index_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         dates = pd.bdate_range(start_date, end_date)
@@ -96,3 +140,18 @@ class MockProvider(DataProvider):
                     "change_20d": _RNG.normal(0, 8), "change_60d": _RNG.normal(0, 15),
                 })
         return pd.DataFrame(rows)
+
+    def get_sector_stocks(self, sector: str, as_of_date: str | None = None) -> pd.DataFrame:
+        stocks = list(MOCK_STOCKS.items())[:5]
+        return pd.DataFrame(
+            [
+                {"sector": sector, "stock_code": code, "stock_name": name, "as_of_date": as_of_date}
+                for code, name in stocks
+            ]
+        )
+
+    def get_stock_sector(self, stock_code: str, as_of_date: str | None = None) -> pd.DataFrame:
+        sector = MOCK_SECTORS[hash(stock_code) % len(MOCK_SECTORS)]
+        return pd.DataFrame(
+            [{"stock_code": stock_code, "sector": sector, "as_of_date": as_of_date}]
+        )

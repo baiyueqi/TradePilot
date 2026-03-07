@@ -1,4 +1,5 @@
 import duckdb
+
 from tradepilot.config import DB_PATH
 
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -53,6 +54,48 @@ def _init_tables(conn: duckdb.DuckDBPyConnection):
             avg_pe DOUBLE, avg_pb DOUBLE,
             change_1d DOUBLE, change_5d DOUBLE, change_20d DOUBLE, change_60d DOUBLE,
             PRIMARY KEY (sector, date)
+        );
+        CREATE TABLE IF NOT EXISTS stock_weekly (
+            stock_code VARCHAR, date DATE,
+            open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE,
+            volume BIGINT, amount DOUBLE, turnover DOUBLE,
+            PRIMARY KEY (stock_code, date)
+        );
+        CREATE TABLE IF NOT EXISTS stock_monthly (
+            stock_code VARCHAR, date DATE,
+            open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE,
+            volume BIGINT, amount DOUBLE, turnover DOUBLE,
+            PRIMARY KEY (stock_code, date)
+        );
+        CREATE TABLE IF NOT EXISTS sector_stocks (
+            sector VARCHAR, stock_code VARCHAR, stock_name VARCHAR, as_of_date DATE,
+            PRIMARY KEY (sector, stock_code, as_of_date)
+        );
+        CREATE TABLE IF NOT EXISTS stock_sector_map (
+            stock_code VARCHAR, sector VARCHAR, as_of_date DATE,
+            PRIMARY KEY (stock_code, sector, as_of_date)
+        );
+        CREATE TABLE IF NOT EXISTS news_items (
+            source VARCHAR, source_item_id VARCHAR, title VARCHAR, content VARCHAR,
+            category VARCHAR, published_at TIMESTAMP, collected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            content_hash VARCHAR, processing_status VARCHAR DEFAULT 'pending',
+            processing_error VARCHAR, processed_at TIMESTAMP,
+            PRIMARY KEY (source, source_item_id)
+        );
+        CREATE TABLE IF NOT EXISTS video_content (
+            source VARCHAR, source_item_id VARCHAR, title VARCHAR, video_url VARCHAR,
+            file_path VARCHAR, published_at TIMESTAMP, collected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            content_hash VARCHAR, processing_status VARCHAR DEFAULT 'pending',
+            processing_error VARCHAR, processed_at TIMESTAMP,
+            PRIMARY KEY (source, source_item_id)
+        );
+        CREATE TABLE IF NOT EXISTS ingestion_runs (
+            id BIGINT PRIMARY KEY,
+            job_name VARCHAR, source_type VARCHAR, trigger_mode VARCHAR,
+            status VARCHAR, started_at TIMESTAMP, finished_at TIMESTAMP,
+            records_discovered BIGINT DEFAULT 0, records_inserted BIGINT DEFAULT 0,
+            records_updated BIGINT DEFAULT 0, records_failed BIGINT DEFAULT 0,
+            error_message VARCHAR
         );
         CREATE TABLE IF NOT EXISTS portfolio (
             id INTEGER PRIMARY KEY,

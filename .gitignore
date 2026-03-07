@@ -177,3 +177,7 @@ dist/
 
 # subs
 bilibili_subs
+
+
+# duckdb
+*.duckdb
