@@ -1,6 +1,8 @@
 """Phase-one ingestion orchestration service."""
 
-from datetime import datetime
+from datetime import date as date_cls, datetime
+from importlib import import_module
+import time
 
 from loguru import logger
 
@@ -22,6 +24,15 @@ _STOCK_DAILY_COLS = "stock_code, date, open, high, low, close, volume, amount, t
 _STOCK_WEEKLY_COLS = _STOCK_DAILY_COLS
 _STOCK_MONTHLY_COLS = _STOCK_DAILY_COLS
 _INDEX_DAILY_COLS = "index_code, date, open, high, low, close, volume, amount"
+_TRADING_CALENDAR_COLS = "exchange, trade_date, is_open, pretrade_date"
+_MARKET_DAILY_STATS_COLS = (
+    "trade_date, market_code, market_name, listed_count, total_share, float_share, total_mv, float_mv, amount, vol, trans_count, pe, turnover_rate"
+)
+_TUSHARE_MAX_SYNC_DAYS = 31
+
+
+def _run_id() -> int:
+    return time.time_ns()
 
 
 def _insert_df(conn, table: str, columns: str, df_name: str, df) -> None:
@@ -37,10 +48,13 @@ def _insert_df(conn, table: str, columns: str, df_name: str, df) -> None:
 class IngestionService:
     """Coordinate manual sync flows and persist run history."""
 
+    def __init__(self) -> None:
+        self._tushare = import_module("tradepilot.data.tushare_client").TushareClient()
+
     def sync_market(self, request: SyncRequest) -> SyncResult:
         """Run a market sync and persist its execution history."""
         run = IngestionRun(
-            id=int(datetime.now().timestamp() * 1000),
+            id=_run_id(),
             job_name="market_sync",
             source_type=SourceType.MARKET,
             trigger_mode=TriggerMode.MANUAL,
@@ -64,7 +78,7 @@ class IngestionService:
     def sync_news(self, request: NewsSyncRequest) -> SyncResult:
         """Run a news sync and persist its execution history."""
         run = IngestionRun(
-            id=int(datetime.now().timestamp() * 1000),
+            id=_run_id(),
             job_name="news_sync",
             source_type=SourceType.NEWS,
             trigger_mode=TriggerMode.MANUAL,
@@ -91,7 +105,7 @@ class IngestionService:
     def sync_bilibili(self, request: BilibiliSyncRequest) -> SyncResult:
         """Run a Bilibili video sync and persist its execution history."""
         run = IngestionRun(
-            id=int(datetime.now().timestamp() * 1000),
+            id=_run_id(),
             job_name="bilibili_sync",
             source_type=SourceType.BILIBILI,
             trigger_mode=TriggerMode.MANUAL,
@@ -152,6 +166,26 @@ class IngestionService:
             _insert_df(conn, "index_daily", _INDEX_DAILY_COLS, "tmp_index", index_df)
             inserted += len(index_df)
 
+        inserted += self._sync_tushare_supplement(conn, request.start_date, request.end_date)
+
+        return inserted
+
+    def _sync_tushare_supplement(self, conn, start_date: str, end_date: str) -> int:
+        if not self._tushare.enabled:
+            return 0
+        start = date_cls.fromisoformat(start_date)
+        end = date_cls.fromisoformat(end_date)
+        if (end - start).days > _TUSHARE_MAX_SYNC_DAYS:
+            raise ValueError(f"tushare supplemental sync range exceeds {_TUSHARE_MAX_SYNC_DAYS} days")
+        inserted = 0
+        calendar_df = self._tushare.get_trade_calendar(start_date, end_date)
+        if not calendar_df.empty:
+            _insert_df(conn, "trading_calendar", _TRADING_CALENDAR_COLS, "tmp_trade_calendar", calendar_df)
+            inserted += len(calendar_df)
+        stats_df = self._tushare.get_market_daily_stats(start_date, end_date)
+        if not stats_df.empty:
+            _insert_df(conn, "market_daily_stats", _MARKET_DAILY_STATS_COLS, "tmp_market_daily_stats", stats_df)
+            inserted += len(stats_df)
         return inserted
 
     def _save_run(self, run: IngestionRun) -> None:

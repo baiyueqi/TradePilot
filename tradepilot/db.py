@@ -123,6 +123,38 @@ def _init_tables(conn: duckdb.DuckDBPyConnection):
             message TEXT,
             read_at TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS trading_calendar (
+            exchange VARCHAR NOT NULL,
+            trade_date DATE NOT NULL,
+            is_open BOOLEAN NOT NULL,
+            pretrade_date DATE,
+            PRIMARY KEY (exchange, trade_date)
+        );
+        CREATE TABLE IF NOT EXISTS market_daily_stats (
+            trade_date DATE NOT NULL,
+            market_code VARCHAR NOT NULL,
+            market_name VARCHAR,
+            listed_count INTEGER,
+            total_share DOUBLE,
+            float_share DOUBLE,
+            total_mv DOUBLE,
+            float_mv DOUBLE,
+            amount DOUBLE,
+            vol DOUBLE,
+            trans_count DOUBLE,
+            pe DOUBLE,
+            turnover_rate DOUBLE,
+            PRIMARY KEY (trade_date, market_code)
+        );
+        CREATE TABLE IF NOT EXISTS scheduler_history (
+            id BIGINT PRIMARY KEY,
+            job_name VARCHAR NOT NULL,
+            started_at TIMESTAMP NOT NULL,
+            finished_at TIMESTAMP,
+            status VARCHAR,
+            records_affected INTEGER,
+            error_message TEXT
+        );
         CREATE TABLE IF NOT EXISTS portfolio (
             id INTEGER PRIMARY KEY,
             stock_code VARCHAR, stock_name VARCHAR,
