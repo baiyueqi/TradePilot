@@ -49,6 +49,16 @@ export const markAlertRead = (id: number) => fetch(`${API_BASE}/briefing/alerts/
 export const getSchedulerStatus = () => fetchJson<any>("/scheduler/status");
 export const getSchedulerHistory = (limit = 10) => fetchJson<any[]>(`/scheduler/history?limit=${limit}`);
 
+// Workflow
+export const getWorkflowStatus = () => fetchJson<any>("/workflow/status");
+export const getWorkflowHistory = (limit = 10) => fetchJson<any[]>(`/workflow/history?limit=${limit}`);
+export const getLatestWorkflow = (phase: "pre_market" | "post_market") =>
+  fetchJson<any | null>(`/workflow/latest?phase=${phase}`);
+export const runPreMarketWorkflow = (workflowDate?: string) =>
+  fetch(`${API_BASE}/workflow/pre/run${workflowDate ? `?workflow_date=${encodeURIComponent(workflowDate)}` : ""}`, { method: "POST" }).then(r => r.json());
+export const runPostMarketWorkflow = (workflowDate?: string) =>
+  fetch(`${API_BASE}/workflow/post/run${workflowDate ? `?workflow_date=${encodeURIComponent(workflowDate)}` : ""}`, { method: "POST" }).then(r => r.json());
+
 // Summary
 export const getDailySummary = (params?: {
   industry_top_n?: number;

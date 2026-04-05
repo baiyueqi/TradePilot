@@ -181,3 +181,4 @@ bilibili_subs
 
 # duckdb
 *.duckdb
+*.duckdb.wal

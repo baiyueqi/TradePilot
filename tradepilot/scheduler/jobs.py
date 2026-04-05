@@ -7,9 +7,9 @@ import time
 from loguru import logger
 
 from tradepilot.db import get_conn
-from tradepilot.ingestion.models import NewsSyncRequest, SyncRequest
-from tradepilot.ingestion.service import IngestionService
 from tradepilot.scanner.daily import DailyScanner
+from tradepilot.workflow.models import WorkflowTrigger
+from tradepilot.workflow.service import DailyWorkflowService
 
 
 def _tushare_client():
@@ -57,54 +57,40 @@ def _should_run_for_trading_day(target_date: str) -> bool:
     return _tushare_client().is_trading_day(target_date)
 
 
-def market_sync_job() -> dict:
+def _run_workflow_job(job_name: str, runner) -> dict:
     started_at = datetime.now()
-    today = started_at.strftime("%Y-%m-%d")
-    if not _should_run_for_trading_day(today):
-        _record_history("market_sync", started_at, "skipped", 0, "non-trading day")
-        return {"status": "skipped", "reason": "non-trading day"}
     try:
-        result = IngestionService().sync_market(SyncRequest(start_date=today, end_date=today, full_refresh=False))
-        affected = result.run.records_inserted + result.run.records_updated
-        _record_history("market_sync", started_at, "success", affected, None)
-        return {"status": "success", "records_affected": affected}
+        run = runner()
+        affected = sum(step.records_affected for step in run.summary.steps)
+        _record_history(job_name, started_at, run.status.value, affected, run.error_message)
+        if run.status.value in {"failed", "partial"} and run.error_message:
+            _create_failure_alert(job_name, run.error_message)
+        return {
+            "status": run.status.value,
+            "records_affected": affected,
+            "workflow_date": run.workflow_date,
+        }
     except Exception as exc:
-        logger.exception("scheduler market_sync failed")
-        _record_history("market_sync", started_at, "failed", 0, str(exc))
-        _create_failure_alert("market_sync", str(exc))
+        logger.exception("scheduler {} failed", job_name)
+        _record_history(job_name, started_at, "failed", 0, str(exc))
+        _create_failure_alert(job_name, str(exc))
         return {"status": "failed", "error": str(exc)}
 
 
-def news_sync_job() -> dict:
-    started_at = datetime.now()
-    try:
-        result = IngestionService().sync_news(NewsSyncRequest())
-        affected = result.run.records_inserted + result.run.records_updated
-        _record_history("news_sync", started_at, "success", affected, None)
-        return {"status": "success", "records_affected": affected}
-    except Exception as exc:
-        logger.exception("scheduler news_sync failed")
-        _record_history("news_sync", started_at, "failed", 0, str(exc))
-        _create_failure_alert("news_sync", str(exc))
-        return {"status": "failed", "error": str(exc)}
+def pre_market_workflow_job() -> dict:
+    service = DailyWorkflowService()
+    return _run_workflow_job(
+        "pre_market_workflow",
+        lambda: service.run_pre_market_workflow(triggered_by=WorkflowTrigger.SCHEDULER),
+    )
 
 
-def daily_scan_job() -> dict:
-    started_at = datetime.now()
-    today = started_at.strftime("%Y-%m-%d")
-    if not _should_run_for_trading_day(today):
-        _record_history("daily_scan", started_at, "skipped", 0, "non-trading day")
-        return {"status": "skipped", "reason": "non-trading day"}
-    try:
-        result = DailyScanner().run(scan_date=today)
-        affected = len(result.watchlist_advice) + len(result.position_advice) + len(result.core_instrument_advice)
-        _record_history("daily_scan", started_at, "success", affected, None)
-        return {"status": "success", "records_affected": affected}
-    except Exception as exc:
-        logger.exception("scheduler daily_scan failed")
-        _record_history("daily_scan", started_at, "failed", 0, str(exc))
-        _create_failure_alert("daily_scan", str(exc))
-        return {"status": "failed", "error": str(exc)}
+def post_market_workflow_job() -> dict:
+    service = DailyWorkflowService()
+    return _run_workflow_job(
+        "post_market_workflow",
+        lambda: service.run_post_market_workflow(triggered_by=WorkflowTrigger.SCHEDULER),
+    )
 
 
 def get_scheduler_history(limit: int = 20) -> list[dict]:

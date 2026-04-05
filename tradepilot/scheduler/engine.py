@@ -7,7 +7,7 @@ from typing import Any
 
 from loguru import logger
 
-from tradepilot.scheduler.jobs import daily_scan_job, market_sync_job, news_sync_job
+from tradepilot.scheduler.jobs import post_market_workflow_job, pre_market_workflow_job
 
 _scheduler: Any | None = None
 
@@ -32,9 +32,8 @@ def start_scheduler() -> None:
     if not _scheduler_enabled():
         logger.info("scheduler startup skipped in reload parent process")
         return
-    scheduler.add_job(market_sync_job, cron.CronTrigger(day_of_week="mon-fri", hour=16, minute=0), id="market_sync", replace_existing=True)
-    scheduler.add_job(news_sync_job, cron.CronTrigger(day_of_week="mon-fri", hour="9-15", minute="0,30"), id="news_sync", replace_existing=True)
-    scheduler.add_job(daily_scan_job, cron.CronTrigger(day_of_week="mon-fri", hour=16, minute=30), id="daily_scan", replace_existing=True)
+    scheduler.add_job(pre_market_workflow_job, cron.CronTrigger(day_of_week="mon-fri", hour=8, minute=30), id="pre_market_workflow", replace_existing=True)
+    scheduler.add_job(post_market_workflow_job, cron.CronTrigger(day_of_week="mon-fri", hour=16, minute=30), id="post_market_workflow", replace_existing=True)
     scheduler.start()
     logger.info("scheduler started with {} jobs", len(scheduler.get_jobs()))
 

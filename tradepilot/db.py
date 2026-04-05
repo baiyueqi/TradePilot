@@ -1,18 +1,35 @@
+import threading
+
 import duckdb
 
 from tradepilot.config import DB_PATH
 
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-_conn = None
+_thread_local = threading.local()
+_init_lock = threading.Lock()
+_initialized = False
 
 
 def get_conn() -> duckdb.DuckDBPyConnection:
-    global _conn
-    if _conn is None:
-        _conn = duckdb.connect(str(DB_PATH))
-        _init_tables(_conn)
-    return _conn
+    """Return a thread-local DuckDB connection.
+
+    The app serves HTTP requests and scheduler jobs concurrently. Reusing one
+    global DuckDB connection across threads can leave pending results on the
+    shared cursor/connection and trigger runtime errors. Each thread therefore
+    gets its own connection, while schema initialization remains process-wide.
+    """
+    global _initialized
+    conn = getattr(_thread_local, "conn", None)
+    if conn is None:
+        conn = duckdb.connect(str(DB_PATH))
+        _thread_local.conn = conn
+    if not _initialized:
+        with _init_lock:
+            if not _initialized:
+                _init_tables(conn)
+                _initialized = True
+    return conn
 
 
 def _init_tables(conn: duckdb.DuckDBPyConnection):
@@ -153,6 +170,17 @@ def _init_tables(conn: duckdb.DuckDBPyConnection):
             finished_at TIMESTAMP,
             status VARCHAR,
             records_affected INTEGER,
+            error_message TEXT
+        );
+        CREATE TABLE IF NOT EXISTS workflow_runs (
+            id BIGINT PRIMARY KEY,
+            workflow_date DATE NOT NULL,
+            phase VARCHAR NOT NULL,
+            triggered_by VARCHAR NOT NULL,
+            status VARCHAR NOT NULL,
+            started_at TIMESTAMP NOT NULL,
+            finished_at TIMESTAMP,
+            summary_json TEXT NOT NULL,
             error_message TEXT
         );
         CREATE TABLE IF NOT EXISTS portfolio (

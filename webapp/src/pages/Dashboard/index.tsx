@@ -1,489 +1,394 @@
-import { useEffect, useState } from "react";
-import { Card, Row, Col, Tabs, Tag, Table, Statistic, Space, Progress, Button } from "antd";
-import { ArrowUpOutlined, ArrowDownOutlined } from "@ant-design/icons";
-import { Line } from "@ant-design/charts";
+import { useEffect, useMemo, useState } from "react";
+import { Alert, Button, Card, Col, Divider, List, Row, Space, Statistic, Table, Tabs, Tag, Typography } from "antd";
+import { ReloadOutlined } from "@ant-design/icons";
 import {
-  getIndexDaily,
-  getMarketSentiment,
-  getSectorRotation,
-  getPositions,
-  getPlans,
-  getStockDaily,
-  runDailyScan,
-  getLatestScan,
-  getAlerts,
-  markAlertRead,
-  getSchedulerStatus,
+  getLatestWorkflow,
   getSchedulerHistory,
+  getSchedulerStatus,
+  getWorkflowHistory,
+  getWorkflowStatus,
+  runPostMarketWorkflow,
+  runPreMarketWorkflow,
 } from "../../services/api";
 
-const INDICES = [
-  { code: "000001", name: "上证指数" },
-  { code: "399001", name: "深证成指" },
-  { code: "399006", name: "创业板指" },
-  { code: "000688", name: "科创50" },
-];
+const { Paragraph, Text, Title } = Typography;
+
+type WorkflowPhase = "pre_market" | "post_market";
+
+function statusColor(status?: string) {
+  return (
+    {
+      success: "green",
+      partial: "orange",
+      failed: "red",
+      skipped: "default",
+    } as Record<string, string>
+  )[status || ""] || "default";
+}
+
+function stepStatusColor(status?: string) {
+  return (
+    {
+      success: "green",
+      failed: "red",
+      skipped: "default",
+      partial: "orange",
+    } as Record<string, string>
+  )[status || ""] || "default";
+}
 
 export default function Dashboard() {
-  const [indexSummary, setIndexSummary] = useState<any[]>([]);
-  const [indexData, setIndexData] = useState<any[]>([]);
-  const [activeIndex, setActiveIndex] = useState("000001");
-  const [sentiment, setSentiment] = useState<any>(null);
-  const [sectors, setSectors] = useState<any>(null);
-  const [positions, setPositions] = useState<any[]>([]);
-  const [positionPrices, setPositionPrices] = useState<Record<string, number>>({});
-  const [activePlans, setActivePlans] = useState<any[]>([]);
-  const [scanData, setScanData] = useState<{scan_date: string | null; advice: any[]}>({scan_date: null, advice: []});
-  const [alerts, setAlerts] = useState<any[]>([]);
+  const [activePhase, setActivePhase] = useState<WorkflowPhase>("pre_market");
+  const [preWorkflow, setPreWorkflow] = useState<any | null>(null);
+  const [postWorkflow, setPostWorkflow] = useState<any | null>(null);
+  const [workflowStatus, setWorkflowStatus] = useState<any>(null);
+  const [workflowHistory, setWorkflowHistory] = useState<any[]>([]);
   const [schedulerStatus, setSchedulerStatus] = useState<any>(null);
   const [schedulerHistory, setSchedulerHistory] = useState<any[]>([]);
-  const [scanLoading, setScanLoading] = useState(false);
-  const [readingAlertId, setReadingAlertId] = useState<number | null>(null);
+  const [runningPhase, setRunningPhase] = useState<WorkflowPhase | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  const refreshScanData = () => {
-    getLatestScan().then(setScanData).catch(() => setScanData({ scan_date: null, advice: [] }));
-    getAlerts().then(setAlerts).catch(() => setAlerts([]));
-  };
-
-  const refreshSchedulerData = () => {
-    getSchedulerStatus().then(setSchedulerStatus).catch(() => setSchedulerStatus(null));
-    getSchedulerHistory().then(setSchedulerHistory).catch(() => setSchedulerHistory([]));
-  };
-
-  // Load index summary cards
-  useEffect(() => {
-    Promise.all(
-      INDICES.map((idx) =>
-        getIndexDaily(idx.code).then((data) => {
-          if (data.length < 2) return { ...idx, close: 0, change: 0, changePct: 0 };
-          const last = data[data.length - 1];
-          const prev = data[data.length - 2];
-          return {
-            ...idx,
-            close: last.close,
-            change: last.close - prev.close,
-            changePct: ((last.close - prev.close) / prev.close) * 100,
-            volume: last.volume,
-          };
-        })
-      )
-    ).then(setIndexSummary);
-  }, []);
-
-  // Load K-line for selected index
-  useEffect(() => {
-    getIndexDaily(activeIndex).then((d) => setIndexData(d.slice(-120)));
-  }, [activeIndex]);
-
-  // Load sentiment, sectors, positions, plans
-  useEffect(() => {
-    getMarketSentiment().then(setSentiment);
-    getSectorRotation().then(setSectors);
-    getPositions().then((pos) => {
-      setPositions(pos);
-      // Fetch current prices for each position
-      const codes = [...new Set(pos.map((p: any) => p.stock_code))];
-      Promise.all(
-        codes.map((code: string) =>
-          getStockDaily(code).then((data) => ({
-            code,
-            price: data.length > 0 ? data[data.length - 1].close : 0,
-          }))
-        )
-      ).then((results) => {
-        const prices: Record<string, number> = {};
-        results.forEach((r) => (prices[r.code] = r.price));
-        setPositionPrices(prices);
-      });
-    });
-    getPlans("active").then(setActivePlans);
-    refreshScanData();
-    refreshSchedulerData();
-  }, []);
-
-  const upColor = "#cf1322";
-  const downColor = "#3f8600";
-  const pnlColor = (v: number) => (v >= 0 ? upColor : downColor);
-
-  const sentimentColor = (label: string) =>
-    ({ "过热": "#ff4d4f", "偏热": "#fa8c16", "中性": "#1890ff", "偏冷": "#52c41a" }[label] || "#1890ff");
-
-  const actionColor = (action: string) =>
-    ({ "建仓": "#52c41a", "关注": "#1890ff", "持有": "#8c8c8c", "减仓": "#fa8c16", "清仓": "#ff4d4f", "观望": "#d9d9d9" }[action] || "#8c8c8c");
-
-  const urgencyColor = (urgency: string) =>
-    ({ "立即": "#ff4d4f", "关注": "#fa8c16", "无需操作": "#d9d9d9" }[urgency] || "#8c8c8c");
-
-  const alertTypeColor = (t: string) =>
-    ({ stop_loss: "#ff4d4f", take_profit: "#fa8c16", watchlist_opportunity: "#1890ff", rotation: "#722ed1" }[t] || "#8c8c8c");
-
-  const handleRunScan = async () => {
-    setScanLoading(true);
+  const refreshData = async () => {
+    setLoading(true);
     try {
-      await runDailyScan();
-      refreshScanData();
+      const [pre, post, status, history, scheduler, schedulerRuns] = await Promise.all([
+        getLatestWorkflow("pre_market"),
+        getLatestWorkflow("post_market"),
+        getWorkflowStatus(),
+        getWorkflowHistory(10),
+        getSchedulerStatus(),
+        getSchedulerHistory(10),
+      ]);
+      setPreWorkflow(pre);
+      setPostWorkflow(post);
+      setWorkflowStatus(status);
+      setWorkflowHistory(history);
+      setSchedulerStatus(scheduler);
+      setSchedulerHistory(schedulerRuns);
     } finally {
-      setScanLoading(false);
+      setLoading(false);
     }
   };
 
-  const handleMarkAlertRead = async (id: number) => {
-    setReadingAlertId(id);
+  useEffect(() => {
+    refreshData();
+  }, []);
+
+  const handleRunWorkflow = async (phase: WorkflowPhase) => {
+    setRunningPhase(phase);
     try {
-      await markAlertRead(id);
-      refreshScanData();
+      if (phase === "pre_market") {
+        await runPreMarketWorkflow();
+      } else {
+        await runPostMarketWorkflow();
+      }
+      await refreshData();
     } finally {
-      setReadingAlertId(null);
+      setRunningPhase(null);
     }
   };
+
+  const currentWorkflow = useMemo(() => {
+    return activePhase === "pre_market" ? preWorkflow?.run : postWorkflow?.run;
+  }, [activePhase, postWorkflow, preWorkflow]);
+
+  const summary = currentWorkflow?.summary;
+  const steps = summary?.steps || [];
+  const alerts = summary?.alerts || [];
+  const watchSectors = summary?.watchlist?.watch_sectors || [];
+  const watchStocks = summary?.watchlist?.watch_stocks || [];
+  const newsItems = summary?.news?.items || [];
+  const scanAdvice = summary?.scan?.latest?.advice || [];
 
   return (
     <div>
-      {/* Row 1: Index Summary Cards + Sentiment */}
-      <Row gutter={[12, 12]}>
-        {indexSummary.map((idx) => (
-          <Col key={idx.code} flex="1">
-            <Card size="small" hoverable onClick={() => setActiveIndex(idx.code)}
-              style={{ borderLeft: activeIndex === idx.code ? "3px solid #1890ff" : undefined }}>
-              <div style={{ fontSize: 12, color: "#666" }}>{idx.name}</div>
-              <div style={{ fontSize: 20, fontWeight: "bold", color: pnlColor(idx.change) }}>
-                {idx.close?.toFixed(2)}
-              </div>
-              <div style={{ fontSize: 12, color: pnlColor(idx.change) }}>
-                {idx.change >= 0 ? "+" : ""}{idx.change?.toFixed(2)}{" "}
-                ({idx.changePct >= 0 ? "+" : ""}{idx.changePct?.toFixed(2)}%)
+      <Space direction="vertical" size={16} style={{ width: "100%" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <Title level={3} style={{ marginBottom: 4 }}>Daily Workflow</Title>
+            <Text type="secondary">将首页收敛为盘前准备 / 盘后复盘两个阶段。</Text>
+          </div>
+          <Button icon={<ReloadOutlined />} onClick={refreshData} loading={loading}>刷新</Button>
+        </div>
+
+        <Row gutter={[12, 12]}>
+          <Col xs={24} md={8}>
+            <Card size="small" title="盘前状态">
+              <Statistic
+                title="最近结果"
+                value={workflowStatus?.pre_market?.status || "暂无"}
+                valueStyle={{ fontSize: 20 }}
+                suffix={<Tag color={statusColor(workflowStatus?.pre_market?.status)}>{workflowStatus?.pre_market?.status || "none"}</Tag>}
+              />
+              <div style={{ marginTop: 8, color: "#666", fontSize: 12 }}>
+                {workflowStatus?.pre_market?.finished_at ? String(workflowStatus.pre_market.finished_at).slice(0, 16).replace("T", " ") : "尚未执行"}
               </div>
             </Card>
           </Col>
-        ))}
-        <Col flex="1">
-          <Card size="small">
-            <div style={{ fontSize: 12, color: "#666" }}>市场情绪</div>
-            {sentiment ? (
-              <>
-                <div style={{ fontSize: 20, fontWeight: "bold", color: sentimentColor(sentiment.sentiment?.label) }}>
-                  {sentiment.sentiment?.score?.toFixed(0)}
-                </div>
-                <Progress
-                  percent={sentiment.sentiment?.score || 50}
-                  showInfo={false}
-                  strokeColor={sentimentColor(sentiment.sentiment?.label)}
-                  size="small"
-                />
-                <div style={{ fontSize: 12 }}>
-                  <Tag color={sentimentColor(sentiment.sentiment?.label)} style={{ margin: 0 }}>
-                    {sentiment.sentiment?.label}
-                  </Tag>
-                </div>
-              </>
-            ) : <div style={{ color: "#999" }}>加载中...</div>}
-          </Card>
-        </Col>
-      </Row>
-
-      {/* Row 2: K-line + Fund Flow */}
-      <Row gutter={[12, 12]} style={{ marginTop: 12 }}>
-        <Col span={14}>
-          <Card title="大盘走势" size="small">
-            <Tabs
-              activeKey={activeIndex}
-              onChange={setActiveIndex}
-              items={INDICES.map((i) => ({ key: i.code, label: i.name }))}
-              size="small"
-            />
-            {indexData.length > 0 && (
-              <Line
-                data={indexData.map((d: any) => ({ date: String(d.date).slice(0, 10), value: d.close }))}
-                xField="date"
-                yField="value"
-                height={240}
-                xAxis={{ tickCount: 6 }}
-                smooth
+          <Col xs={24} md={8}>
+            <Card size="small" title="盘后状态">
+              <Statistic
+                title="最近结果"
+                value={workflowStatus?.post_market?.status || "暂无"}
+                valueStyle={{ fontSize: 20 }}
+                suffix={<Tag color={statusColor(workflowStatus?.post_market?.status)}>{workflowStatus?.post_market?.status || "none"}</Tag>}
               />
-            )}
-          </Card>
-        </Col>
-        <Col span={10}>
-          <Card title="资金面" size="small">
-            {sentiment ? (
-              <Space direction="vertical" style={{ width: "100%" }} size="small">
-                <Statistic
-                  title="北向资金(近5日)"
-                  value={sentiment.northbound?.net_5d ? (sentiment.northbound.net_5d / 1e8).toFixed(1) : 0}
-                  suffix="亿"
-                  valueStyle={{ color: pnlColor(sentiment.northbound?.net_5d || 0), fontSize: 16 }}
-                  prefix={(sentiment.northbound?.net_5d || 0) >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />}
-                />
-                <Statistic
-                  title="融资余额日变化"
-                  value={sentiment.margin?.daily_change ? (sentiment.margin.daily_change / 1e8).toFixed(1) : 0}
-                  suffix="亿"
-                  valueStyle={{ color: pnlColor(sentiment.margin?.daily_change || 0), fontSize: 16 }}
-                />
-                <div>
-                  <div style={{ color: "#666", fontSize: 12, marginBottom: 4 }}>ETF资金流(近5日)</div>
-                  {sentiment.etf && Object.entries(sentiment.etf).map(([code, v]: any) => (
-                    <div key={code} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-                      <span>{code}</span>
-                      <span style={{ color: pnlColor(v.net_5d) }}>{(v.net_5d / 1e8).toFixed(1)}亿</span>
-                    </div>
-                  ))}
-                </div>
-              </Space>
-            ) : "加载中..."}
-          </Card>
-        </Col>
-      </Row>
-
-      {/* Row 2.5: Daily Scan + Alerts */}
-      <Row gutter={[12, 12]} style={{ marginTop: 12 }}>
-        <Col span={14}>
-          <Card
-            title={scanData.scan_date ? `今日扫描建议 (${scanData.scan_date})` : "今日扫描建议"}
-            size="small"
-            extra={<Button size="small" type="primary" loading={scanLoading} onClick={handleRunScan}>运行扫描</Button>}
-          >
-            {scanData.advice.length > 0 ? (
-              <Table
-                dataSource={scanData.advice}
-                rowKey="stock_code"
-                size="small"
-                pagination={false}
-                columns={[
-                  { title: "股票", dataIndex: "stock_name", width: 70 },
-                  {
-                    title: "操作",
-                    dataIndex: "action",
-                    width: 60,
-                    render: (v: string) => <Tag color={actionColor(v)}>{v}</Tag>,
-                  },
-                  {
-                    title: "紧迫",
-                    dataIndex: "urgency",
-                    width: 70,
-                    render: (v: string) => <Tag color={urgencyColor(v)}>{v}</Tag>,
-                  },
-                  {
-                    title: "评分",
-                    dataIndex: "score",
-                    width: 50,
-                    render: (v: number) => v?.toFixed(0),
-                    sorter: (a: any, b: any) => a.score - b.score,
-                  },
-                  {
-                    title: "理由",
-                    dataIndex: "reasons",
-                    render: (v: string[] | string) => (
-                      <span style={{ fontSize: 12, color: "#666" }}>{Array.isArray(v) ? v.slice(0, 2).join("；") : (v || "")}</span>
-                    ),
-                  },
-                ]}
-              />
-            ) : <div style={{ color: "#999" }}>{scanData.scan_date ? "暂无扫描结果" : "尚未运行今日扫描"}</div>}
-          </Card>
-        </Col>
-        <Col span={10}>
-          <Card title="最新预警" size="small" extra={<Button size="small" onClick={refreshScanData}>刷新</Button>}>
-            {alerts.length > 0 ? (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {alerts.slice(0, 8).map((alert: any) => (
-                  <div key={alert.id} style={{
-                    padding: "6px 8px",
-                    background: alert.read_at ? "#fafafa" : "#fff",
-                    borderRadius: 4,
-                    borderLeft: `3px solid ${alertTypeColor(alert.alert_type)}`,
-                    opacity: alert.read_at ? 0.6 : 1,
-                  }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span style={{ fontWeight: "bold", fontSize: 13 }}>
-                        <Tag color={alertTypeColor(alert.alert_type)} style={{ marginRight: 4, fontSize: 11 }}>
-                          {({ stop_loss: "风控", take_profit: "止盈", watchlist_opportunity: "机会", rotation: "轮动" } as any)[alert.alert_type] || alert.alert_type}
-                        </Tag>
-                        {alert.title}
-                      </span>
-                      {!alert.read_at && (
-                        <Button
-                          type="link"
-                          size="small"
-                          loading={readingAlertId === alert.id}
-                          onClick={() => handleMarkAlertRead(alert.id)}
-                        >
-                          已读
-                        </Button>
-                      )}
-                    </div>
-                    {alert.message && (
-                      <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>{alert.message}</div>
-                    )}
-                  </div>
-                ))}
+              <div style={{ marginTop: 8, color: "#666", fontSize: 12 }}>
+                {workflowStatus?.post_market?.finished_at ? String(workflowStatus.post_market.finished_at).slice(0, 16).replace("T", " ") : "尚未执行"}
               </div>
-            ) : <div style={{ color: "#999" }}>暂无预警</div>}
-          </Card>
-        </Col>
-      </Row>
-
-      {/* Row 3: Sectors + Portfolio & Plans */}
-      <Row gutter={[12, 12]} style={{ marginTop: 12 }}>
-        <Col span={14}>
-          <Card title="行业板块" size="small">
-            {sectors?.sectors ? (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {sectors.sectors
-                  .slice()
-                  .sort((a: any, b: any) => (b.change_1d || 0) - (a.change_1d || 0))
-                  .map((s: any) => (
-                    <Card
-                      key={s.sector}
-                      size="small"
-                      style={{
-                        width: "calc(20% - 8px)",
-                        background: s.change_1d >= 0 ? "#fff1f0" : "#f6ffed",
-                        borderColor: s.change_1d >= 0 ? "#ffa39e" : "#b7eb8f",
-                      }}
-                    >
-                      <div style={{ fontWeight: "bold", fontSize: 12 }}>{s.sector}</div>
-                      <div style={{ color: pnlColor(s.change_1d), fontSize: 14 }}>
-                        {s.change_1d >= 0 ? "+" : ""}{s.change_1d?.toFixed(2)}%
-                      </div>
-                      <div style={{ fontSize: 10, color: "#999" }}>60日: {s.change_60d?.toFixed(1)}%</div>
-                    </Card>
-                  ))}
-              </div>
-            ) : "加载中..."}
-            {sectors?.switch_suggestions?.length > 0 && (
-              <div style={{ marginTop: 12 }}>
-                <strong>高切低建议:</strong>
-                {sectors.switch_suggestions.map((s: any, i: number) => (
-                  <Tag key={i} color="blue" style={{ margin: 4 }}>{s.from_sector} → {s.to_sector}</Tag>
-                ))}
-              </div>
-            )}
-          </Card>
-        </Col>
-        <Col span={10}>
-          <Card title="调度器状态" size="small" style={{ marginBottom: 12 }} extra={<Button size="small" onClick={refreshSchedulerData}>刷新</Button>}>
-            <div style={{ marginBottom: 8 }}>
-              <Tag color={schedulerStatus?.running ? "green" : "default"}>
-                {schedulerStatus?.running ? "运行中" : "未运行"}
-              </Tag>
-            </div>
-            {schedulerStatus?.jobs?.length ? (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12 }}>
-                {schedulerStatus.jobs.map((job: any) => (
-                  <div key={job.id} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+            </Card>
+          </Col>
+          <Col xs={24} md={8}>
+            <Card size="small" title="调度器状态">
+              <Tag color={schedulerStatus?.running ? "green" : "default"}>{schedulerStatus?.running ? "运行中" : "未运行"}</Tag>
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                {(schedulerStatus?.jobs || []).map((job: any) => (
+                  <div key={job.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
                     <span>{job.id}</span>
                     <span style={{ color: "#666" }}>{job.next_run_time ? String(job.next_run_time).slice(5, 16).replace("T", " ") : "-"}</span>
                   </div>
                 ))}
               </div>
-            ) : <div style={{ color: "#999" }}>暂无调度任务</div>}
-          </Card>
+            </Card>
+          </Col>
+        </Row>
 
-          {/* Portfolio P&L */}
-          <Card title="持仓盈亏" size="small" style={{ marginBottom: 12 }}>
-            {positions.length > 0 ? (
+        <Card size="small">
+          <Tabs
+            activeKey={activePhase}
+            onChange={(key) => setActivePhase(key as WorkflowPhase)}
+            items={[
+              { key: "pre_market", label: "盘前准备" },
+              { key: "post_market", label: "盘后复盘" },
+            ]}
+            tabBarExtraContent={
+              <Space>
+                <Button
+                  size="small"
+                  type={activePhase === "pre_market" ? "primary" : "default"}
+                  loading={runningPhase === "pre_market"}
+                  onClick={() => handleRunWorkflow("pre_market")}
+                >
+                  运行盘前
+                </Button>
+                <Button
+                  size="small"
+                  type={activePhase === "post_market" ? "primary" : "default"}
+                  loading={runningPhase === "post_market"}
+                  onClick={() => handleRunWorkflow("post_market")}
+                >
+                  运行盘后
+                </Button>
+              </Space>
+            }
+          />
+
+          {currentWorkflow ? (
+            <Space direction="vertical" size={16} style={{ width: "100%" }}>
+              <Alert
+                type={currentWorkflow.status === "failed" ? "error" : currentWorkflow.status === "partial" ? "warning" : "info"}
+                showIcon
+                message={`${summary?.title || "工作流"} · ${currentWorkflow.workflow_date}`}
+                description={summary?.overview || currentWorkflow.error_message || "暂无摘要"}
+              />
+
+              <Row gutter={[12, 12]}>
+                <Col xs={24} lg={12}>
+                  <Card size="small" title="执行步骤">
+                    <Table
+                      dataSource={steps}
+                      rowKey="name"
+                      size="small"
+                      pagination={false}
+                      columns={[
+                        { title: "步骤", dataIndex: "name", width: 150 },
+                        {
+                          title: "状态",
+                          dataIndex: "status",
+                          width: 100,
+                          render: (value: string) => <Tag color={stepStatusColor(value)}>{value}</Tag>,
+                        },
+                        { title: "影响", dataIndex: "records_affected", width: 80 },
+                        {
+                          title: "错误",
+                          dataIndex: "error_message",
+                          render: (value: string | null) => value || "-",
+                        },
+                      ]}
+                    />
+                  </Card>
+                </Col>
+                <Col xs={24} lg={12}>
+                  <Card size="small" title="关注池">
+                    <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                      <div>
+                        <Text strong>关注板块</Text>
+                        <div style={{ marginTop: 6 }}>
+                          {watchSectors.length > 0 ? watchSectors.map((sector: string) => <Tag key={sector}>{sector}</Tag>) : <Text type="secondary">暂无</Text>}
+                        </div>
+                      </div>
+                      <Divider style={{ margin: "8px 0" }} />
+                      <div>
+                        <Text strong>关注股票</Text>
+                        <div style={{ marginTop: 6 }}>
+                          {watchStocks.length > 0 ? watchStocks.map((stock: any) => (
+                            <Tag key={stock.code}>{stock.name ? `${stock.name}(${stock.code})` : stock.code}</Tag>
+                          )) : <Text type="secondary">暂无</Text>}
+                        </div>
+                      </div>
+                    </Space>
+                  </Card>
+                </Col>
+              </Row>
+
+              {activePhase === "pre_market" && (
+                <Row gutter={[12, 12]}>
+                  <Col xs={24} lg={12}>
+                    <Card size="small" title="夜间新闻 / 公告">
+                      <List
+                        size="small"
+                        dataSource={newsItems}
+                        locale={{ emptyText: "暂无夜间新闻" }}
+                        renderItem={(item: any) => (
+                          <List.Item>
+                            <div>
+                              <div style={{ fontWeight: 500 }}>{item.title || "未命名新闻"}</div>
+                              <div style={{ fontSize: 12, color: "#666" }}>
+                                {item.source || "unknown"}
+                                {item.published_at ? ` · ${String(item.published_at).slice(0, 16).replace("T", " ")}` : ""}
+                              </div>
+                            </div>
+                          </List.Item>
+                        )}
+                      />
+                    </Card>
+                  </Col>
+                  <Col xs={24} lg={12}>
+                    <Card size="small" title="Carry-over 提示">
+                      {summary?.carry_over?.available ? (
+                        <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                          <Text>来源日期：{summary.carry_over.workflow_date}</Text>
+                          <Paragraph style={{ marginBottom: 0 }}>{summary.carry_over.overview || "暂无盘后摘要"}</Paragraph>
+                        </Space>
+                      ) : (
+                        <Text type="secondary">暂无上一交易日盘后结果。</Text>
+                      )}
+                    </Card>
+                  </Col>
+                </Row>
+              )}
+
+              {activePhase === "post_market" && (
+                <Row gutter={[12, 12]}>
+                  <Col xs={24} lg={14}>
+                    <Card size="small" title="扫描建议摘要">
+                      <Table
+                        dataSource={scanAdvice.slice(0, 10)}
+                        rowKey="stock_code"
+                        size="small"
+                        pagination={false}
+                        locale={{ emptyText: "暂无扫描建议" }}
+                        columns={[
+                          { title: "股票", dataIndex: "stock_name", width: 90 },
+                          { title: "代码", dataIndex: "stock_code", width: 90 },
+                          { title: "操作", dataIndex: "action", width: 80 },
+                          { title: "紧迫", dataIndex: "urgency", width: 80 },
+                          {
+                            title: "评分",
+                            dataIndex: "score",
+                            width: 70,
+                            render: (value: number) => value?.toFixed?.(0) ?? "-",
+                          },
+                          {
+                            title: "理由",
+                            dataIndex: "reasons",
+                            render: (value: string[] | string) => Array.isArray(value) ? value.slice(0, 2).join("；") : (value || "-"),
+                          },
+                        ]}
+                      />
+                    </Card>
+                  </Col>
+                  <Col xs={24} lg={10}>
+                    <Card size="small" title="最近预警">
+                      <List
+                        size="small"
+                        dataSource={alerts}
+                        locale={{ emptyText: "暂无预警" }}
+                        renderItem={(item: any) => (
+                          <List.Item>
+                            <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                              <div>
+                                <Tag color={item.read_at ? "default" : "red"}>{item.urgency || "medium"}</Tag>
+                                <Text strong>{item.title}</Text>
+                              </div>
+                              {item.message ? <Text type="secondary">{item.message}</Text> : null}
+                            </Space>
+                          </List.Item>
+                        )}
+                      />
+                    </Card>
+                  </Col>
+                </Row>
+              )}
+            </Space>
+          ) : (
+            <Alert type="info" showIcon message="暂无工作流结果" description="先运行一次盘前或盘后 workflow。" />
+          )}
+        </Card>
+
+        <Row gutter={[12, 12]}>
+          <Col xs={24} lg={12}>
+            <Card size="small" title="Workflow 历史">
               <Table
-                dataSource={positions}
+                dataSource={workflowHistory}
                 rowKey="id"
                 size="small"
                 pagination={false}
                 columns={[
-                  { title: "股票", dataIndex: "stock_name", width: 70 },
+                  { title: "阶段", dataIndex: "phase", width: 120 },
                   {
-                    title: "现价",
-                    width: 65,
-                    render: (_: any, r: any) => positionPrices[r.stock_code]?.toFixed(2) ?? "-",
+                    title: "状态",
+                    dataIndex: "status",
+                    width: 90,
+                    render: (value: string) => <Tag color={statusColor(value)}>{value}</Tag>,
                   },
+                  { title: "触发", dataIndex: "triggered_by", width: 90 },
                   {
-                    title: "盈亏%",
-                    width: 70,
-                    render: (_: any, r: any) => {
-                      const cur = positionPrices[r.stock_code];
-                      if (!cur || !r.buy_price) return "-";
-                      const pct = ((cur - r.buy_price) / r.buy_price) * 100;
-                      return <span style={{ color: pnlColor(pct), fontWeight: "bold" }}>
-                        {pct >= 0 ? "+" : ""}{pct.toFixed(1)}%
-                      </span>;
-                    },
-                  },
-                  {
-                    title: "盈亏额",
-                    width: 80,
-                    render: (_: any, r: any) => {
-                      const cur = positionPrices[r.stock_code];
-                      if (!cur || !r.buy_price || !r.quantity) return "-";
-                      const pnl = (cur - r.buy_price) * r.quantity;
-                      return <span style={{ color: pnlColor(pnl) }}>
-                        {pnl >= 0 ? "+" : ""}{pnl.toFixed(0)}
-                      </span>;
-                    },
+                    title: "时间",
+                    dataIndex: "started_at",
+                    render: (value: string) => String(value).slice(5, 16).replace("T", " "),
                   },
                 ]}
               />
-            ) : <div style={{ color: "#999" }}>暂无持仓</div>}
-          </Card>
-
-          {/* Active Trade Plans */}
-          <Card title="活跃交易计划" size="small" style={{ marginBottom: 12 }}>
-            {activePlans.length > 0 ? (
-              <Table
-                dataSource={activePlans}
-                rowKey="id"
-                size="small"
-                pagination={false}
-                columns={[
-                  { title: "股票", dataIndex: "stock_name", width: 70 },
-                  {
-                    title: "止损",
-                    dataIndex: "stop_loss_pct",
-                    width: 55,
-                    render: (v: number) => <span style={{ color: downColor }}>{v}%</span>,
-                  },
-                  {
-                    title: "止盈",
-                    dataIndex: "take_profit_pct",
-                    width: 55,
-                    render: (v: number) => <span style={{ color: upColor }}>+{v}%</span>,
-                  },
-                  {
-                    title: "评分",
-                    dataIndex: "composite_score",
-                    width: 50,
-                    render: (v: number) => v?.toFixed(0),
-                  },
-                ]}
-              />
-            ) : <div style={{ color: "#999" }}>暂无活跃计划</div>}
-          </Card>
-
-          <Card title="最近调度历史" size="small">
-            {schedulerHistory.length > 0 ? (
+            </Card>
+          </Col>
+          <Col xs={24} lg={12}>
+            <Card size="small" title="Scheduler 历史">
               <Table
                 dataSource={schedulerHistory}
                 rowKey="id"
                 size="small"
                 pagination={false}
                 columns={[
-                  { title: "任务", dataIndex: "job_name", width: 80 },
+                  { title: "任务", dataIndex: "job_name", width: 150 },
                   {
                     title: "状态",
                     dataIndex: "status",
-                    width: 70,
-                    render: (v: string) => <Tag color={v === "success" ? "green" : v === "failed" ? "red" : "default"}>{v}</Tag>,
+                    width: 90,
+                    render: (value: string) => <Tag color={statusColor(value)}>{value}</Tag>,
                   },
-                  { title: "影响", dataIndex: "records_affected", width: 60 },
+                  { title: "影响", dataIndex: "records_affected", width: 70 },
                   {
                     title: "时间",
                     dataIndex: "started_at",
-                    render: (v: string) => <span style={{ fontSize: 12, color: "#666" }}>{String(v).slice(5, 16).replace("T", " ")}</span>,
+                    render: (value: string) => String(value).slice(5, 16).replace("T", " "),
                   },
                 ]}
               />
-            ) : <div style={{ color: "#999" }}>暂无运行历史</div>}
-          </Card>
-        </Col>
-      </Row>
+            </Card>
+          </Col>
+        </Row>
+      </Space>
     </div>
   );
 }

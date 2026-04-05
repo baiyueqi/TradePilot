@@ -18,8 +18,8 @@ import TradePlan from "./pages/TradePlan";
 const { Sider, Content } = Layout;
 
 const menuItems = [
-  { key: "/", icon: <StockOutlined />, label: <NavLink to="/">市场概览</NavLink> },
-  { key: "/dashboard", icon: <DashboardOutlined />, label: <NavLink to="/dashboard">仪表盘</NavLink> },
+  { key: "/", icon: <DashboardOutlined />, label: <NavLink to="/">Daily Workflow</NavLink> },
+  { key: "/dashboard", icon: <StockOutlined />, label: <NavLink to="/dashboard">市场概览</NavLink> },
   { key: "/analysis", icon: <LineChartOutlined />, label: <NavLink to="/analysis">个股分析</NavLink> },
   { key: "/sectors", icon: <AppstoreOutlined />, label: <NavLink to="/sectors">行业地图</NavLink> },
   { key: "/portfolio", icon: <FundOutlined />, label: <NavLink to="/portfolio">持仓管理</NavLink> },
@@ -38,8 +38,8 @@ function App() {
         </Sider>
         <Content style={{ padding: 24 }}>
           <Routes>
-            <Route path="/" element={<MarketSummary />} />
-            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/dashboard" element={<MarketSummary />} />
             <Route path="/analysis" element={<StockAnalysis />} />
             <Route path="/sectors" element={<SectorMap />} />
             <Route path="/portfolio" element={<Portfolio />} />
