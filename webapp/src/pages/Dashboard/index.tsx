@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Card, Row, Col, Tabs, Tag, Table, Statistic, Space, Progress } from "antd";
+import { Card, Row, Col, Tabs, Tag, Table, Statistic, Space, Progress, Button } from "antd";
 import { ArrowUpOutlined, ArrowDownOutlined } from "@ant-design/icons";
 import { Line } from "@ant-design/charts";
 import {
@@ -9,6 +9,10 @@ import {
   getPositions,
   getPlans,
   getStockDaily,
+  runDailyScan,
+  getLatestScan,
+  getAlerts,
+  markAlertRead,
 } from "../../services/api";
 
 const INDICES = [
@@ -27,6 +31,15 @@ export default function Dashboard() {
   const [positions, setPositions] = useState<any[]>([]);
   const [positionPrices, setPositionPrices] = useState<Record<string, number>>({});
   const [activePlans, setActivePlans] = useState<any[]>([]);
+  const [scanData, setScanData] = useState<{scan_date: string | null; advice: any[]}>({scan_date: null, advice: []});
+  const [alerts, setAlerts] = useState<any[]>([]);
+  const [scanLoading, setScanLoading] = useState(false);
+  const [readingAlertId, setReadingAlertId] = useState<number | null>(null);
+
+  const refreshScanData = () => {
+    getLatestScan().then(setScanData).catch(() => setScanData({ scan_date: null, advice: [] }));
+    getAlerts().then(setAlerts).catch(() => setAlerts([]));
+  };
 
   // Load index summary cards
   useEffect(() => {
@@ -75,6 +88,7 @@ export default function Dashboard() {
       });
     });
     getPlans("active").then(setActivePlans);
+    refreshScanData();
   }, []);
 
   const upColor = "#cf1322";
@@ -83,6 +97,35 @@ export default function Dashboard() {
 
   const sentimentColor = (label: string) =>
     ({ "过热": "#ff4d4f", "偏热": "#fa8c16", "中性": "#1890ff", "偏冷": "#52c41a" }[label] || "#1890ff");
+
+  const actionColor = (action: string) =>
+    ({ "建仓": "#52c41a", "关注": "#1890ff", "持有": "#8c8c8c", "减仓": "#fa8c16", "清仓": "#ff4d4f", "观望": "#d9d9d9" }[action] || "#8c8c8c");
+
+  const urgencyColor = (urgency: string) =>
+    ({ "立即": "#ff4d4f", "关注": "#fa8c16", "无需操作": "#d9d9d9" }[urgency] || "#8c8c8c");
+
+  const alertTypeColor = (t: string) =>
+    ({ stop_loss: "#ff4d4f", take_profit: "#fa8c16", watchlist_opportunity: "#1890ff", rotation: "#722ed1" }[t] || "#8c8c8c");
+
+  const handleRunScan = async () => {
+    setScanLoading(true);
+    try {
+      await runDailyScan();
+      refreshScanData();
+    } finally {
+      setScanLoading(false);
+    }
+  };
+
+  const handleMarkAlertRead = async (id: number) => {
+    setReadingAlertId(id);
+    try {
+      await markAlertRead(id);
+      refreshScanData();
+    } finally {
+      setReadingAlertId(null);
+    }
+  };
 
   return (
     <div>
@@ -178,6 +221,94 @@ export default function Dashboard() {
                 </div>
               </Space>
             ) : "加载中..."}
+          </Card>
+        </Col>
+      </Row>
+
+      {/* Row 2.5: Daily Scan + Alerts */}
+      <Row gutter={[12, 12]} style={{ marginTop: 12 }}>
+        <Col span={14}>
+          <Card
+            title={scanData.scan_date ? `今日扫描建议 (${scanData.scan_date})` : "今日扫描建议"}
+            size="small"
+            extra={<Button size="small" type="primary" loading={scanLoading} onClick={handleRunScan}>运行扫描</Button>}
+          >
+            {scanData.advice.length > 0 ? (
+              <Table
+                dataSource={scanData.advice}
+                rowKey="stock_code"
+                size="small"
+                pagination={false}
+                columns={[
+                  { title: "股票", dataIndex: "stock_name", width: 70 },
+                  {
+                    title: "操作",
+                    dataIndex: "action",
+                    width: 60,
+                    render: (v: string) => <Tag color={actionColor(v)}>{v}</Tag>,
+                  },
+                  {
+                    title: "紧迫",
+                    dataIndex: "urgency",
+                    width: 70,
+                    render: (v: string) => <Tag color={urgencyColor(v)}>{v}</Tag>,
+                  },
+                  {
+                    title: "评分",
+                    dataIndex: "score",
+                    width: 50,
+                    render: (v: number) => v?.toFixed(0),
+                    sorter: (a: any, b: any) => a.score - b.score,
+                  },
+                  {
+                    title: "理由",
+                    dataIndex: "reasons",
+                    render: (v: string[] | string) => (
+                      <span style={{ fontSize: 12, color: "#666" }}>{Array.isArray(v) ? v.slice(0, 2).join("；") : (v || "")}</span>
+                    ),
+                  },
+                ]}
+              />
+            ) : <div style={{ color: "#999" }}>{scanData.scan_date ? "暂无扫描结果" : "尚未运行今日扫描"}</div>}
+          </Card>
+        </Col>
+        <Col span={10}>
+          <Card title="最新预警" size="small" extra={<Button size="small" onClick={refreshScanData}>刷新</Button>}>
+            {alerts.length > 0 ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {alerts.slice(0, 8).map((alert: any) => (
+                  <div key={alert.id} style={{
+                    padding: "6px 8px",
+                    background: alert.read_at ? "#fafafa" : "#fff",
+                    borderRadius: 4,
+                    borderLeft: `3px solid ${alertTypeColor(alert.alert_type)}`,
+                    opacity: alert.read_at ? 0.6 : 1,
+                  }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontWeight: "bold", fontSize: 13 }}>
+                        <Tag color={alertTypeColor(alert.alert_type)} style={{ marginRight: 4, fontSize: 11 }}>
+                          {({ stop_loss: "风控", take_profit: "止盈", watchlist_opportunity: "机会", rotation: "轮动" } as any)[alert.alert_type] || alert.alert_type}
+                        </Tag>
+                        {alert.title}
+                      </span>
+                      {!alert.read_at && (
+                        <Button
+                          type="link"
+                          size="small"
+                          loading={readingAlertId === alert.id}
+                          onClick={() => handleMarkAlertRead(alert.id)}
+                        >
+                          已读
+                        </Button>
+                      )}
+                    </div>
+                    {alert.message && (
+                      <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>{alert.message}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : <div style={{ color: "#999" }}>暂无预警</div>}
           </Card>
         </Col>
       </Row>

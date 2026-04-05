@@ -16,7 +16,6 @@ import {
   Button,
   Modal,
   Input,
-  Form,
   Divider,
   Tooltip,
 } from "antd";
@@ -193,34 +192,6 @@ export default function MarketSummary() {
     setWatchlistModalOpen(false);
     if (mode === "5m") fetchData();
   };
-
-  // Table columns
-  const indexColumns = [
-    { title: "指数", dataIndex: "name", key: "name" },
-    {
-      title: "收盘",
-      dataIndex: "close",
-      key: "close",
-      render: (v: number) => v.toFixed(2),
-    },
-    {
-      title: "涨跌幅",
-      dataIndex: "change_pct",
-      key: "change_pct",
-      render: (v: number) => (
-        <span style={{ color: pnlColor(v) }}>
-          {v >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />}
-          {" "}{Math.abs(v).toFixed(2)}%
-        </span>
-      ),
-    },
-    {
-      title: "成交额",
-      dataIndex: "turnover",
-      key: "turnover",
-      render: (v: number) => `${(v / 1e8).toFixed(0)}亿`,
-    },
-  ];
 
   const sectorColumns = [
     { title: "#", key: "idx", render: (_: any, __: any, i: number) => i + 1, width: 40 },
@@ -678,7 +649,7 @@ export default function MarketSummary() {
         onCancel={() => setWatchlistModalOpen(false)}
         width={600}
       >
-        <Divider orientation="left">关注板块</Divider>
+        <Divider>关注板块</Divider>
         <Space direction="vertical" style={{ width: "100%" }}>
           {watchlist.watch_sectors.map((s: string, i: number) => (
             <Space key={i}>
@@ -704,7 +675,7 @@ export default function MarketSummary() {
           </Space>
         </Space>
 
-        <Divider orientation="left">关注个股</Divider>
+        <Divider>关注个股</Divider>
         <Space direction="vertical" style={{ width: "100%" }}>
           {watchlist.watch_stocks.map((s: any, i: number) => (
             <Space key={i}>

@@ -39,6 +39,12 @@ export const updatePlanStatus = (id: number, data: any) => fetch(`${API_BASE}/tr
 export const monitorPlan = (id: number) => fetchJson<any>(`/trade_plan/${id}/monitor`);
 export const deletePlan = (id: number) => fetch(`${API_BASE}/trade_plan/${id}`, { method: "DELETE" }).then(r => r.json());
 
+// Briefing
+export const runDailyScan = (scanDate?: string) => fetchJson<any>(`/briefing/scan/run${scanDate ? `?scan_date=${encodeURIComponent(scanDate)}` : ""}`);
+export const getLatestScan = () => fetchJson<{scan_date: string | null; advice: any[]}>("/briefing/scan/latest");
+export const getAlerts = (unreadOnly = false) => fetchJson<any[]>(`/briefing/alerts${unreadOnly ? "?unread_only=true" : ""}`);
+export const markAlertRead = (id: number) => fetch(`${API_BASE}/briefing/alerts/${id}/read`, { method: "POST" }).then(r => r.json());
+
 // Summary
 export const getDailySummary = (params?: {
   industry_top_n?: number;
