@@ -182,3 +182,9 @@ bilibili_subs
 # duckdb
 *.duckdb
 *.duckdb.wal
+
+# briefings
+briefings/*
+
+# research
+research_report/*

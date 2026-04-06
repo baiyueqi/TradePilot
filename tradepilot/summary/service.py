@@ -15,6 +15,7 @@ import akshare as ak
 import pandas as pd
 from loguru import logger
 
+from tradepilot.data.tushare_client import TushareClient
 from tradepilot.summary.cache import SnapshotCache
 from tradepilot.summary.models import (
     DailySummaryResponse,
@@ -52,6 +53,8 @@ _MORNING_OPEN = dtime(9, 15)
 _MORNING_CLOSE = dtime(11, 30)
 _AFTERNOON_OPEN = dtime(13, 0)
 _AFTERNOON_CLOSE = dtime(15, 15)
+
+_TUSHARE = TushareClient()
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +191,7 @@ def _fetch_sectors(
     is_industry: bool,
     top_n: int = 20,
     ascending: bool = False,
+    trade_date: str | None = None,
 ) -> list[SectorRecord]:
     """Fetch sector performance (industry or concept board)."""
     try:
@@ -196,24 +200,84 @@ def _fetch_sectors(
             if is_industry
             else ak.stock_board_concept_name_em()
         )
+        records: list[dict] = []
+        for _, row in df.iterrows():
+            records.append({
+                "code": _safe_str(row.get("板块代码")),
+                "name": _safe_str(row.get("板块名称")),
+                "change_pct": _safe_float(row.get("涨跌幅")),
+                "up_count": _safe_int(row.get("上涨家数")),
+                "down_count": _safe_int(row.get("下跌家数")),
+                "leader": _safe_str(row.get("领涨股票")),
+            })
+        records.sort(key=lambda x: x["change_pct"], reverse=not ascending)
+        return [SectorRecord(**r) for r in records[:top_n]]
     except Exception as exc:
         label = "industry" if is_industry else "concept"
         logger.warning("{} sectors fetch failed: {}", label, exc)
+
+    if not _TUSHARE.enabled:
         return []
 
-    records: list[dict] = []
-    for _, row in df.iterrows():
-        records.append({
-            "code": _safe_str(row.get("板块代码")),
-            "name": _safe_str(row.get("板块名称")),
-            "change_pct": _safe_float(row.get("涨跌幅")),
-            "up_count": _safe_int(row.get("上涨家数")),
-            "down_count": _safe_int(row.get("下跌家数")),
-            "leader": _safe_str(row.get("领涨股票")),
-        })
+    try:
+        trade_date = trade_date or datetime.now().strftime("%Y%m%d")
+        if is_industry:
+            pro = _TUSHARE._pro
+            if pro is None:
+                return []
+            ind_df = pro.index_classify(level="L1", src="SW2021")
+            l1_codes = set(ind_df["index_code"].tolist()) if not ind_df.empty else set()
+            df = pro.sw_daily(trade_date=trade_date)
+            if df.empty:
+                return []
+            if l1_codes:
+                df = df[df["ts_code"].isin(l1_codes)]
+            df = df.sort_values("pct_change", ascending=ascending).head(top_n)
+            records = [
+                {
+                    "code": _safe_str(row.get("ts_code")),
+                    "name": _safe_str(row.get("name")),
+                    "change_pct": round(_safe_float(row.get("pct_change")), 2),
+                    "up_count": 0,
+                    "down_count": 0,
+                    "leader": "",
+                }
+                for _, row in df.iterrows()
+            ]
+            return [SectorRecord(**r) for r in records]
 
-    records.sort(key=lambda x: x["change_pct"], reverse=not ascending)
-    return [SectorRecord(**r) for r in records[:top_n]]
+        pro = _TUSHARE._pro
+        if pro is None:
+            return []
+        index_frames = []
+        for type_ in ("N", "S", "R"):
+            try:
+                frame = pro.ths_index(exchange="A", type=type_)
+                if not frame.empty:
+                    index_frames.append(frame[["ts_code", "name"]])
+            except Exception:
+                continue
+        daily_df = pro.ths_daily(trade_date=trade_date)
+        if not index_frames or daily_df.empty:
+            return []
+        index_df = pd.concat(index_frames, ignore_index=True).drop_duplicates(subset=["ts_code"], keep="first")
+        merged = daily_df.merge(index_df[["ts_code", "name"]], on="ts_code", how="left")
+        merged = merged.sort_values("pct_change", ascending=ascending).head(top_n)
+        records = [
+            {
+                "code": _safe_str(row.get("ts_code")),
+                "name": _safe_str(row.get("name")),
+                "change_pct": round(_safe_float(row.get("pct_change")), 2),
+                "up_count": 0,
+                "down_count": 0,
+                "leader": "",
+            }
+            for _, row in merged.iterrows()
+        ]
+        return [SectorRecord(**r) for r in records]
+    except Exception as exc:
+        logger.warning("tushare {} sectors fetch failed: {}", label, exc)
+        return []
 
 
 def _fetch_all_stocks_snapshot() -> pd.DataFrame:
@@ -561,10 +625,10 @@ class MarketSnapshotService:
 
         with ThreadPoolExecutor(max_workers=8) as pool:
             f_indices = pool.submit(_fetch_indices)
-            f_ind_top = pool.submit(_fetch_sectors, True, industry_top_n, False)
-            f_ind_bot = pool.submit(_fetch_sectors, True, industry_bottom_n, True)
-            f_con_top = pool.submit(_fetch_sectors, False, concept_top_n, False)
-            f_con_bot = pool.submit(_fetch_sectors, False, concept_bottom_n, True)
+            f_ind_top = pool.submit(_fetch_sectors, True, industry_top_n, False, None)
+            f_ind_bot = pool.submit(_fetch_sectors, True, industry_bottom_n, True, None)
+            f_con_top = pool.submit(_fetch_sectors, False, concept_top_n, False, None)
+            f_con_bot = pool.submit(_fetch_sectors, False, concept_bottom_n, True, None)
             f_snapshot = pool.submit(_fetch_all_stocks_snapshot)
 
         indices = _safe_future(f_indices, [])
@@ -617,7 +681,7 @@ class MarketSnapshotService:
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             f_indices = pool.submit(_fetch_indices)
-            f_concepts = pool.submit(_fetch_sectors, False, 1000, False)
+            f_concepts = pool.submit(_fetch_sectors, False, 1000, False, None)
             f_snapshot = pool.submit(_fetch_all_stocks_snapshot)
 
         indices = _safe_future(f_indices, [])

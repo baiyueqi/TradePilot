@@ -93,18 +93,18 @@ function getTitleText(context: WorkflowContextPayload | null, workflow?: Workflo
 
 function getInsightIntro(state?: string, schemaVersion?: string) {
   if (state === "stale") {
-    return "当前 insight 基于旧 context 生成，请结合下方最新 context 使用。";
+    return "当前 The-One insight 基于旧 context 生成，TradePilot briefing 仍以最新 workflow 为准。";
   }
   if (state === "failed") {
-    return "Insight 生成失败，当前回退展示 TradePilot context。";
+    return "The-One insight 生成失败，当前继续展示 TradePilot briefing。";
   }
   if (state === "completed") {
-    return `The-One insight 已就绪 · ${schemaVersion || "unknown schema"}`;
+    return `The-One 补充分析已就绪 · ${schemaVersion || "unknown schema"}`;
   }
   if (state === "pending") {
-    return "Insight 生成中，当前先展示 TradePilot context。";
+    return "The-One insight 生成中，当前先查看 TradePilot briefing。";
   }
-  return "尚未生成 insight，当前展示 TradePilot context。";
+  return "尚未生成 The-One insight，当前展示 TradePilot briefing。";
 }
 
 function renderMetricDescriptions(section: WorkflowInsightSection) {
@@ -367,6 +367,23 @@ export default function Dashboard() {
   const insightSections: WorkflowInsightSection[] = Array.isArray(insightPayload?.sections) ? insightPayload.sections : [];
   const hasInsight = currentInsight?.state === "completed" || currentInsight?.state === "stale";
   const insightSummary = insightPayload?.summary;
+  const briefingHighlights = activePhase === "pre_market"
+    ? [
+        actionFrame?.posture ? `姿态：${actionFrame.posture}` : null,
+        (actionFrame?.focus_directions || []).length > 0 ? `关注方向：${(actionFrame.focus_directions || []).slice(0, 3).join(" / ")}` : null,
+        (todayWatchlist?.focus_sectors || []).length > 0
+          ? `重点板块：${(todayWatchlist.focus_sectors || []).slice(0, 3).map((item: any) => item.sector_name).filter(Boolean).join(" / ")}`
+          : null,
+        newsItems.length > 0 ? `隔夜信息：${newsItems.length} 条` : null,
+      ].filter(Boolean)
+    : [
+        marketOverview?.regime ? `市场状态：${marketOverview.regime}` : null,
+        (sectorPositioning?.market_leaders || []).length > 0
+          ? `主线方向：${(sectorPositioning.market_leaders || []).slice(0, 3).map((item: any) => item.sector_name).filter(Boolean).join(" / ")}`
+          : null,
+        nextDayPrep?.market_bias ? `明日偏向：${nextDayPrep.market_bias}` : null,
+        trackedItems.length > 0 ? `跟踪对象：${trackedItems.length} 个` : null,
+      ].filter(Boolean);
 
   const contextPanels = activePhase === "pre_market"
     ? [
@@ -799,7 +816,7 @@ export default function Dashboard() {
     }
     return (
       <Space size={16} style={{ width: "100%", display: "flex", flexDirection: "column", alignItems: "stretch" }}>
-        <Card size="small" variant="borderless" style={{ background: hasInsight ? "#e6f4ff" : "#fff7e6", borderLeft: "3px solid #1677ff", borderRadius: 8 }}>
+        <Card size="small" variant="borderless" style={{ background: "#f6ffed", borderLeft: "3px solid #52c41a", borderRadius: 8 }}>
           <Space size={10} style={{ width: "100%", display: "flex", flexDirection: "column", alignItems: "stretch" }}>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
               <div>
@@ -813,8 +830,14 @@ export default function Dashboard() {
             </div>
 
             <Paragraph style={{ marginBottom: 0 }}>
-              {hasInsight ? (insightSummary || getOverviewText(currentContext, currentWorkflow)) : getOverviewText(currentContext, currentWorkflow)}
+              {getOverviewText(currentContext, currentWorkflow)}
             </Paragraph>
+
+            {briefingHighlights.length > 0 ? (
+              <div>
+                {briefingHighlights.map((item) => <Tag key={item}>{item}</Tag>)}
+              </div>
+            ) : null}
 
             <Alert
               type={currentInsight?.state === "failed" ? "error" : currentInsight?.state === "stale" ? "warning" : hasInsight ? "success" : "info"}
@@ -824,17 +847,10 @@ export default function Dashboard() {
           </Space>
         </Card>
 
-        {hasInsight && insightSections.length > 0 ? (
-          <div style={{ background: "#f0f7ff", borderRadius: 8, padding: "12px 12px 0" }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "#1677ff", marginBottom: 8, letterSpacing: 1, textTransform: "uppercase" }}>Insight 分析</div>
-            <Row gutter={[12, 12]}>
-              {insightSections.map((section, index) => renderStandardInsightSection(section, index))}
-            </Row>
-          </div>
-        ) : null}
-
         <div style={{ borderTop: "1px solid #e8e8e8", paddingTop: 16 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: "#8c8c8c", marginBottom: 12, letterSpacing: 1, textTransform: "uppercase" }}>Context 参考</div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#389e0d", marginBottom: 12, letterSpacing: 1, textTransform: "uppercase" }}>
+            {activePhase === "pre_market" ? "盘前简报" : "盘后简报"}
+          </div>
           <Space size={12} style={{ width: "100%", display: "flex", flexDirection: "column", alignItems: "stretch" }}>
             {contextPanels.map((panel) => (
               <Card key={panel.key} size="small" title={panel.label} style={{ background: "#fafafa" }}>
@@ -843,6 +859,18 @@ export default function Dashboard() {
             ))}
           </Space>
         </div>
+
+        {hasInsight && insightSections.length > 0 ? (
+          <div style={{ background: "#f0f7ff", borderRadius: 8, padding: "12px 12px 0" }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#1677ff", marginBottom: 8, letterSpacing: 1, textTransform: "uppercase" }}>
+              The-One 补充分析
+            </div>
+            {insightSummary ? <Paragraph style={{ marginBottom: 12 }}>{insightSummary}</Paragraph> : null}
+            <Row gutter={[12, 12]}>
+              {insightSections.map((section, index) => renderStandardInsightSection(section, index))}
+            </Row>
+          </div>
+        ) : null}
       </Space>
     );
   }
@@ -918,7 +946,7 @@ export default function Dashboard() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
             <Title level={3} style={{ marginBottom: 4 }}>Daily Workflow</Title>
-            <Text type="secondary">The-One insight 优先展示，TradePilot context 作为可展开参考层。</Text>
+            <Text type="secondary">TradePilot briefing 主展示，The-One 作为补充摘要与扩展分析。</Text>
           </div>
           <Space>
             <Button icon={<HistoryOutlined />} onClick={() => setHistoryOpen(true)}>历史记录</Button>

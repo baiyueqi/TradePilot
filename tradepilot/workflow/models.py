@@ -82,6 +82,8 @@ class WorkflowSummary(BaseModel):
     news: dict = Field(default_factory=dict)
     scheduler: dict = Field(default_factory=dict)
     carry_over: dict = Field(default_factory=dict)
+    cross_day_review: dict = Field(default_factory=dict)
+    research_archive: dict = Field(default_factory=dict)
 
 
 class WorkflowRunRecord(BaseModel):

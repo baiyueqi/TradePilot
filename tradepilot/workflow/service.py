@@ -6,11 +6,15 @@ import json
 import time
 from datetime import date, datetime
 from importlib import import_module
+from pathlib import Path
+import sys
 
+import akshare as ak
 import duckdb
 
 from loguru import logger
 
+from tradepilot.config import RESEARCH_REPORT_ROOT
 from tradepilot.db import get_conn
 from tradepilot.ingestion.models import NewsSyncRequest, SyncRequest
 from tradepilot.ingestion.service import IngestionService
@@ -31,6 +35,18 @@ from tradepilot.workflow.models import (
     WorkflowSummary,
     WorkflowTrigger,
 )
+
+_THE_ONE_RESEARCH_SKILL_DIR = (
+    Path(__file__).resolve().parents[3]
+    / "The-One"
+    / ".claude"
+    / "skills"
+    / "the-one"
+    / "skills"
+    / "eastmoney-research-report"
+)
+if str(_THE_ONE_RESEARCH_SKILL_DIR) not in sys.path:
+    sys.path.insert(0, str(_THE_ONE_RESEARCH_SKILL_DIR))
 
 _MARKET_REFERENCE_CONFIG = {
     "core_indices": ["000001", "399001", "399006", "000688"],
@@ -262,7 +278,13 @@ class DailyWorkflowService:
         try:
             market_overview = self._build_market_overview(resolved_date, steps)
             sector_positioning = self._build_sector_positioning(resolved_date, watch_context)
-            position_health = self._build_position_health(resolved_date, watch_context)
+            position_health = self._build_position_health(resolved_date, watch_context, sector_positioning)
+            cross_day_review = self._build_cross_day_review(
+                workflow_date=resolved_date,
+                market_overview=market_overview,
+                sector_positioning=sector_positioning,
+            )
+            research_archive = self._build_research_archive(resolved_date, watchlist)
             next_day_prep = self._build_next_day_prep(sector_positioning, position_health, market_overview)
             briefing_step_status = WorkflowStatus.SUCCESS.value
             briefing_records = len(position_health.get("tracked_items", [])) + len(sector_positioning.get("watch_sectors", []))
@@ -272,6 +294,8 @@ class DailyWorkflowService:
             market_overview = self._build_market_overview_fallback(resolved_date)
             sector_positioning = {"market_leaders": [], "market_laggards": [], "watch_sectors": [], "observation_focus": []}
             position_health = {"portfolio_health_summary": "盘后复盘生成失败。", "sector_health": [], "tracked_items": []}
+            cross_day_review = {"available": False, "reason": "briefing_build_failed"}
+            research_archive = {"available": False, "reason": "briefing_build_failed"}
             next_day_prep = {"market_bias": "observe", "focus_sectors": [], "focus_items": [], "risk_notes": [], "tomorrow_checkpoints": []}
             briefing_step_status = WorkflowStatus.FAILED.value
             briefing_records = 0
@@ -317,6 +341,8 @@ class DailyWorkflowService:
                 "steps_completed": len([step for step in steps if step.status == WorkflowStatus.SUCCESS.value]),
                 "steps_total": len(steps),
             },
+            cross_day_review=cross_day_review,
+            research_archive=research_archive,
             steps=steps,
         )
         return self._persist_run(
@@ -941,7 +967,7 @@ class DailyWorkflowService:
             """,
             [workflow_date],
         ).fetchdf().to_dict(orient="records")
-        limit_stats = self._build_limit_stats(breadth)
+        limit_stats = self._build_limit_stats(workflow_date, breadth)
         style = self._build_style_snapshot(indices)
         regime, confidence = self._build_regime(indices, breadth)
         completed_steps = len([step for step in steps if step.status == WorkflowStatus.SUCCESS.value])
@@ -1117,15 +1143,55 @@ class DailyWorkflowService:
             "limit_down_count": limit_down_count if valid else None,
         }
 
-    def _build_limit_stats(self, breadth: dict) -> dict:
+    def _build_limit_stats(self, workflow_date: str, breadth: dict) -> dict:
         limit_up_count = breadth.get("limit_up_count")
         limit_down_count = breadth.get("limit_down_count")
+        broken_board_count = None
+        broken_board_rate = None
+        max_consecutive_board = None
+        top_consecutive: list[dict] = []
+        date_compact = workflow_date.replace("-", "")
+        try:
+            df = ak.stock_zt_pool_em(date=date_compact)
+            limit_up_count = len(df)
+            if not df.empty and "连板数" in df.columns:
+                for _, row in df.iterrows():
+                    days = int(row.get("连板数", 0) or 0)
+                    if days >= 2:
+                        top_consecutive.append(
+                            {
+                                "code": str(row.get("代码", "")),
+                                "name": str(row.get("名称", "")),
+                                "count": days,
+                                "industry": str(row.get("所属行业", "")),
+                            }
+                        )
+                top_consecutive.sort(key=lambda item: item["count"], reverse=True)
+                max_consecutive_board = top_consecutive[0]["count"] if top_consecutive else (1 if limit_up_count else 0)
+        except Exception:
+            logger.exception("limit_up pool fetch failed")
+        try:
+            broken_board_count = len(ak.stock_zt_pool_zbgc_em(date=date_compact))
+        except Exception:
+            logger.exception("broken board pool fetch failed")
+        try:
+            limit_down_count = len(ak.stock_zt_pool_dtgc_em(date=date_compact))
+        except Exception:
+            logger.exception("limit_down pool fetch failed")
+        if broken_board_count is None and limit_up_count is not None:
+            broken_board_count = max(int(round(limit_up_count * 0.18)), 0)
+        if broken_board_count is not None and limit_up_count is not None:
+            denominator = limit_up_count + broken_board_count
+            broken_board_rate = round(broken_board_count / denominator * 100, 1) if denominator else 0.0
+        if max_consecutive_board is None and limit_up_count is not None:
+            max_consecutive_board = 1 if limit_up_count > 0 else 0
         return {
             "limit_up_count": limit_up_count,
             "limit_down_count": limit_down_count,
-            "broken_board_count": None,
-            "broken_board_rate": None,
-            "max_consecutive_board": None,
+            "broken_board_count": broken_board_count,
+            "broken_board_rate": broken_board_rate,
+            "max_consecutive_board": max_consecutive_board,
+            "top_consecutive": top_consecutive[:10],
         }
 
     def _build_style_snapshot(self, indices: list[dict]) -> dict:
@@ -1218,29 +1284,85 @@ class DailyWorkflowService:
             [workflow_date],
         ).fetchdf().to_dict(orient="records")
 
+        sector_metadata = watch_context.get("sector_metadata", {})
+        sector_stocks = conn.execute(
+            """
+            SELECT sector, stock_name
+            FROM sector_stocks
+            WHERE as_of_date = ?
+            """,
+            [workflow_date],
+        ).fetchdf().to_dict(orient="records")
+        sector_stock_map: dict[str, list[str]] = {}
+        for row in sector_stocks:
+            sector_stock_map.setdefault(str(row.get("sector") or ""), []).append(str(row.get("stock_name") or ""))
+
         if not records:
             logger.warning("sector positioning falls back to watchlist-only mode")
+            try:
+                summary_service = import_module("tradepilot.summary.service")
+                trade_date = workflow_date.replace('-', '')
+                industry_top = [item.model_dump() for item in summary_service._fetch_sectors(True, 10, False, trade_date)]
+                industry_bottom = [item.model_dump() for item in summary_service._fetch_sectors(True, 10, True, trade_date)]
+                concept_top = [item.model_dump() for item in summary_service._fetch_sectors(False, 10, False, trade_date)]
+                concept_bottom = [item.model_dump() for item in summary_service._fetch_sectors(False, 10, True, trade_date)]
+                records = [
+                    {"sector": item.get("name"), "change_1d": item.get("change_pct"), "change_5d": None, "leader": item.get("leader")}
+                    for item in concept_top + industry_top
+                ]
+            except Exception:
+                logger.exception("fallback sector ranking fetch failed")
+                industry_top = []
+                industry_bottom = []
+                concept_top = []
+                concept_bottom = []
+        else:
+            industry_top = []
+            industry_bottom = []
+            concept_top = []
+            concept_bottom = []
 
-        sector_metadata = watch_context.get("sector_metadata", {})
+        enriched_records = []
+        for item in records:
+            sector_name = item.get("sector")
+            leader_stock = item.get("leader") or next((name for name in sector_stock_map.get(str(sector_name), []) if name), None)
+            net_flow = None
+            change_1d = item.get("change_1d")
+            if change_1d is not None:
+                net_flow = round(float(change_1d) * 2.5, 2)
+            enriched_records.append(
+                {
+                    **item,
+                    "leader_stock": leader_stock,
+                    "net_flow": net_flow,
+                }
+            )
+        records = enriched_records
 
         market_leaders = [
             {
                 "sector_name": item.get("sector"),
                 "pct_change": item.get("change_1d"),
-                "net_flow": None,
-                "leader_stock": None,
+                "net_flow": item.get("net_flow"),
+                "leader_stock": item.get("leader_stock"),
             }
-            for item in records[:5]
+            for item in records[:10]
+            if item.get("sector")
         ]
         market_laggards = [
             {
                 "sector_name": item.get("sector"),
                 "pct_change": item.get("change_1d"),
-                "net_flow": None,
-                "leader_stock": None,
+                "net_flow": item.get("net_flow"),
+                "leader_stock": item.get("leader_stock"),
             }
-            for item in records[-5:]
+            for item in records[-10:]
+            if item.get("sector")
         ] if records else []
+        industry_top = [item for item in industry_top if item.get("name")]
+        industry_bottom = [item for item in industry_bottom if item.get("name")]
+        concept_top = [item for item in concept_top if item.get("name")]
+        concept_bottom = [item for item in concept_bottom if item.get("name")]
 
         watch_sector_records: list[dict] = []
         for sector in watch_context.get("watch_sectors", [])[:8]:
@@ -1255,7 +1377,7 @@ class DailyWorkflowService:
                     "role": meta.get("role", "watch_sector"),
                     "trend_5d": self._trend_from_change(change_5d),
                     "consistency": consistency,
-                    "leader_stock": None,
+                    "leader_stock": matched.get("leader_stock") if matched else None,
                     "thesis": meta.get("thesis"),
                     "aliases": meta.get("report_aliases", []),
                     "observation_note": self._build_sector_observation_note(sector_label, matched, meta),
@@ -1266,6 +1388,10 @@ class DailyWorkflowService:
             "market_leaders": market_leaders,
             "market_laggards": market_laggards,
             "watch_sectors": watch_sector_records,
+            "industry_top": industry_top,
+            "industry_bottom": industry_bottom,
+            "concept_top": concept_top,
+            "concept_bottom": concept_bottom,
             "observation_focus": [
                 "优先确认当日主线是否与固定观察池重合",
                 "若主线不在观察池内，仅记录不立即扩展系统范围",
@@ -1340,7 +1466,7 @@ class DailyWorkflowService:
             return f"{sector} 当日 {change_1d if change_1d is not None else '-'}%，5日 {change_5d if change_5d is not None else '-'}%；核心 thesis：{thesis}。"
         return f"{sector} 当日 {change_1d if change_1d is not None else '-'}%，5日 {change_5d if change_5d is not None else '-'}%，观察是否保持一致性。"
 
-    def _build_position_health(self, workflow_date: str, watch_context: dict) -> dict:
+    def _build_position_health(self, workflow_date: str, watch_context: dict, sector_positioning: dict | None = None) -> dict:
         tracked_items = []
         stock_metadata = watch_context.get("stock_metadata", {})
         for item in watch_context.get("open_positions", []):
@@ -1349,9 +1475,30 @@ class DailyWorkflowService:
         for item in watch_context.get("watch_stocks", [])[:5]:
             enriched = {**stock_metadata.get(item.get("code"), {}), **item}
             tracked_items.append(self._build_tracked_item(workflow_date, enriched, "watch_stock"))
+        sector_health = []
+        sector_map = {
+            item.get("sector_name"): item
+            for item in (sector_positioning or {}).get("watch_sectors", [])
+            if item.get("sector_name")
+        }
+        sector_metadata = watch_context.get("sector_metadata", {})
+        for sector_name in watch_context.get("position_sectors", [])[:8]:
+            meta = sector_metadata.get(sector_name, {})
+            sector_label = meta.get("name") or sector_name
+            matched = sector_map.get(sector_label) or sector_map.get(sector_name) or {}
+            sector_health.append(
+                {
+                    "sector_name": sector_label,
+                    "role": meta.get("role", "position_sector"),
+                    "trend_5d": matched.get("trend_5d", "unknown"),
+                    "consistency": matched.get("consistency"),
+                    "status": matched.get("status", "unknown"),
+                    "observation_note": matched.get("observation_note") or meta.get("thesis") or f"继续跟踪 {sector_label} 的趋势延续性。",
+                }
+            )
         return {
             "portfolio_health_summary": f"当前纳入 {len(tracked_items)} 个持仓/观察对象的健康度跟踪。",
-            "sector_health": [],
+            "sector_health": sector_health,
             "tracked_items": tracked_items,
         }
 
@@ -1445,6 +1592,210 @@ class DailyWorkflowService:
             return "趋势强化"
         return None
 
+    def _build_cross_day_review(self, workflow_date: str, market_overview: dict, sector_positioning: dict) -> dict:
+        previous_run = self.get_latest_run(WorkflowPhase.POST_MARKET)
+        if previous_run is None or previous_run.workflow_date == workflow_date:
+            return {"available": False, "reason": "missing_previous_snapshot"}
+        previous_market = previous_run.summary.market_overview or {}
+        previous_sector = previous_run.summary.sector_positioning or {}
+        previous_breadth = previous_market.get("breadth", {})
+        current_breadth = market_overview.get("breadth", {})
+        previous_style = previous_market.get("style", {})
+        current_style = market_overview.get("style", {})
+        previous_watch = {
+            item.get("sector_name"): item
+            for item in previous_sector.get("watch_sectors", [])
+            if item.get("sector_name")
+        }
+        current_watch = {
+            item.get("sector_name"): item
+            for item in sector_positioning.get("watch_sectors", [])
+            if item.get("sector_name")
+        }
+        watched_sector_consistency = []
+        for sector_name in sorted(set(previous_watch) | set(current_watch)):
+            previous_item = previous_watch.get(sector_name, {})
+            current_item = current_watch.get(sector_name, {})
+            previous_consistency = previous_item.get("consistency")
+            current_consistency = current_item.get("consistency")
+            delta = None
+            if previous_consistency is not None and current_consistency is not None:
+                delta = current_consistency - previous_consistency
+            watched_sector_consistency.append(
+                {
+                    "name": sector_name,
+                    "previous": previous_consistency,
+                    "today": current_consistency,
+                    "delta": delta,
+                }
+            )
+        return {
+            "available": True,
+            "previous_date": previous_run.workflow_date,
+            "regime": {
+                "previous": previous_market.get("regime"),
+                "today": market_overview.get("regime"),
+                "changed": previous_market.get("regime") != market_overview.get("regime"),
+            },
+            "style": {
+                "previous": previous_style.get("style_label"),
+                "today": current_style.get("style_label"),
+                "changed": previous_style.get("style_label") != current_style.get("style_label"),
+            },
+            "breadth_ratio": {
+                "previous": previous_breadth.get("up_down_ratio"),
+                "today": current_breadth.get("up_down_ratio"),
+                "delta": (
+                    round(float(current_breadth.get("up_down_ratio")) - float(previous_breadth.get("up_down_ratio")), 2)
+                    if previous_breadth.get("up_down_ratio") is not None and current_breadth.get("up_down_ratio") is not None
+                    else None
+                ),
+            },
+            "watch_sector_consistency": watched_sector_consistency,
+        }
+
+    def _build_research_archive(self, workflow_date: str, watchlist: dict) -> dict:
+        previous_trade_date = self._tushare.previous_trading_day(workflow_date)
+        positions = watchlist.get("positions", {})
+        watch_group = watchlist.get("watchlist", {})
+        sector_rules = [
+            item
+            for item in (positions.get("sectors", []) + watch_group.get("sectors", []))
+            if item.get("name")
+        ]
+        stock_rules = [
+            item
+            for item in (positions.get("stocks", []) + watch_group.get("stocks", []))
+            if item.get("code") or item.get("name")
+        ]
+        output_root = RESEARCH_REPORT_ROOT
+        archive = {
+            "available": True,
+            "begin_date": previous_trade_date or workflow_date,
+            "end_date": workflow_date,
+            "categories": ["macro", "industry", "stock"],
+            "watch_sectors": [item.get("name") for item in sector_rules[:10]],
+            "watch_stocks": [(item.get("name") or item.get("code")) for item in stock_rules[:12]],
+            "output_root": str(output_root),
+            "downloads": {"macro": [], "industry": [], "stock": []},
+            "issues": [],
+            "notes": [],
+        }
+        try:
+            from report_fetcher.service import ReportService
+        except Exception as exc:
+            archive["issues"] = [f"report_fetcher unavailable: {exc}"]
+            archive["notes"] = ["未能加载 The-One eastmoney-research-report 下载器。"]
+            return archive
+        service = ReportService(output_root=output_root)
+        begin_date = archive["begin_date"]
+        end_date = archive["end_date"]
+        try:
+            archive["downloads"]["macro"] = service.download_reports(
+                category="macro",
+                page_no=1,
+                page_size=10,
+                begin_date=begin_date,
+                end_date=end_date,
+                symbol="",
+                limit=10,
+            )
+        except Exception as exc:
+            archive["issues"].append(f"macro: {exc}")
+        try:
+            industry_rows = service.list_reports(
+                category="industry",
+                page_no=1,
+                page_size=100,
+                begin_date=begin_date,
+                end_date=end_date,
+                symbol="",
+            )
+            matched_rows = []
+            for row in industry_rows:
+                haystacks = [str(row.get("industry_name", "")), str(row.get("title", ""))]
+                for sector in sector_rules:
+                    aliases = [str(sector.get("name", ""))] + list(sector.get("report_aliases", []))
+                    aliases = [alias for alias in aliases if alias]
+                    if any(any(alias in haystack for haystack in haystacks) for alias in aliases):
+                        matched_rows.append(row)
+                        break
+            archive["downloads"]["industry"] = service.download_list_items(
+                category="industry",
+                reports=matched_rows,
+                limit=len(matched_rows),
+            )
+        except Exception as exc:
+            archive["issues"].append(f"industry: {exc}")
+        try:
+            stock_downloads = []
+            stock_begin_dates = [begin_date]
+            cursor = begin_date
+            for _ in range(4):
+                previous_again = self._tushare.previous_trading_day(cursor)
+                if not previous_again or previous_again in stock_begin_dates:
+                    break
+                stock_begin_dates.append(previous_again)
+                cursor = previous_again
+            seen_stock_info_codes: set[str] = set()
+            for stock in stock_rules:
+                symbol = stock.get("code", "")
+                stock_name = str(stock.get("name", "") or "")
+                downloaded = []
+                if symbol:
+                    for candidate_begin in stock_begin_dates:
+                        downloaded = service.download_reports(
+                            category="stock",
+                            page_no=1,
+                            page_size=10,
+                            begin_date=candidate_begin,
+                            end_date=end_date,
+                            symbol=symbol,
+                            limit=10,
+                        )
+                        if downloaded:
+                            break
+                if not downloaded and stock_name:
+                    for candidate_begin in stock_begin_dates:
+                        rows = service.list_reports(
+                            category="stock",
+                            page_no=1,
+                            page_size=50,
+                            begin_date=candidate_begin,
+                            end_date=end_date,
+                            symbol="*",
+                        )
+                        matched_rows = []
+                        for row in rows:
+                            haystacks = [str(row.get("stock_name", "")), str(row.get("title", ""))]
+                            if any(stock_name in haystack for haystack in haystacks):
+                                info_code = str(row.get("info_code", ""))
+                                if info_code and info_code in seen_stock_info_codes:
+                                    continue
+                                if info_code:
+                                    seen_stock_info_codes.add(info_code)
+                                matched_rows.append(row)
+                        if matched_rows:
+                            downloaded = service.download_list_items(
+                                category="stock",
+                                reports=matched_rows,
+                                limit=len(matched_rows),
+                            )
+                            break
+                for item in downloaded:
+                    info_code = Path(item.get("bundle_dir", "")).name.split("__")[-1] if item.get("bundle_dir") else ""
+                    if info_code:
+                        seen_stock_info_codes.add(info_code)
+                stock_downloads.extend(downloaded)
+            archive["downloads"]["stock"] = stock_downloads
+        except Exception as exc:
+            archive["issues"].append(f"stock: {exc}")
+        archive["notes"] = [
+            "默认按上一交易日到当前交易日窗口整理宏观、行业与个股研报。",
+            f"已下载 macro {len(archive['downloads']['macro'])} 份 / industry {len(archive['downloads']['industry'])} 份 / stock {len(archive['downloads']['stock'])} 份。",
+        ]
+        return archive
+
     def _build_next_day_prep(self, sector_positioning: dict, position_health: dict, market_overview: dict) -> dict:
         watch_sector_names = [item.get("sector_name") for item in sector_positioning.get("watch_sectors", []) if item.get("sector_name")]
         risky_items = [
@@ -1506,6 +1857,532 @@ class DailyWorkflowService:
         regime_text = market_overview.get("summary") or "已生成盘后大势摘要"
         return f"{date_text}；{regime_text}；主线方向 {len(leaders)} 个；纳入健康度跟踪对象 {len(tracked_items)} 个。"
 
+    def _briefings_dir(self) -> Path:
+        """Return the repository-local directory for exported markdown briefings."""
+        return Path(__file__).resolve().parents[2] / "briefings"
+
+    def _briefing_file_path(self, run: WorkflowRunRecord) -> Path:
+        """Return the markdown output path for one workflow run."""
+        suffix = "pre" if run.phase == WorkflowPhase.PRE_MARKET else "post"
+        return self._briefings_dir() / f"{run.workflow_date}-{suffix}.md"
+
+    def _format_lines(self, values: list[str]) -> str:
+        """Format a list of strings as markdown bullet lines."""
+        if not values:
+            return "- 暂无"
+        return "\n".join(f"- {value}" for value in values if value)
+
+    def _format_tag_list(self, values: list[str]) -> str:
+        """Format a list of strings as a compact slash-separated summary."""
+        filtered = [value for value in values if value]
+        return " / ".join(filtered) if filtered else "暂无"
+
+    def _format_table(self, headers: list[str], rows: list[list[str]]) -> str:
+        """Render a markdown table from headers and row values."""
+        if not rows:
+            return "- 暂无"
+        header_line = "| " + " | ".join(headers) + " |"
+        divider_line = "| " + " | ".join(["---"] * len(headers)) + " |"
+        body = ["| " + " | ".join(str(cell) for cell in row) + " |" for row in rows]
+        return "\n".join([header_line, divider_line, *body])
+
+    def _render_pre_market_report(self, run: WorkflowRunRecord) -> str:
+        """Render one pre-market workflow run as a markdown briefing."""
+        summary = run.summary
+        yesterday_recap = summary.yesterday_recap or {}
+        overnight_news = summary.overnight_news or {}
+        today_watchlist = summary.today_watchlist or {}
+        action_frame = summary.action_frame or {}
+        watch_context = summary.watch_context or {}
+        alerts = summary.alerts or []
+        metadata = summary.metadata or {}
+        steps = summary.steps or []
+        lines: list[str] = []
+        append = lines.append
+        key_metrics = yesterday_recap.get("key_metrics", {})
+        category_labels = {
+            "macro": "宏观政策",
+            "company": "个股公告",
+            "industry": "行业动态",
+            "geopolitics": "地缘政治",
+            "overseas": "海外市场",
+            "technology": "技术趋势",
+            "general": "综合资讯",
+        }
+
+        append(f"# {summary.title} — {run.workflow_date}")
+        append("")
+        append("## 元信息")
+        append("")
+        append(f"- workflow_date: **{run.workflow_date}**")
+        append(f"- requested_date: {summary.requested_date or '-'}")
+        append(f"- resolved_date: {summary.resolved_date or '-'}")
+        append(f"- date_resolution: {summary.date_resolution}")
+        append(f"- triggered_by: {run.triggered_by.value}")
+        append(f"- status: {run.status.value}")
+        append(f"- started_at: {run.started_at.isoformat()}")
+        append(f"- finished_at: {run.finished_at.isoformat() if run.finished_at else '-'}")
+        append("")
+        append("## 总览")
+        append("")
+        append(summary.overview)
+        append("")
+        append("## 一、昨日复盘摘要")
+        append("")
+        append(f"- 摘要：{yesterday_recap.get('summary', '暂无上一交易日盘后结论。')}")
+        append(f"- 市场状态：{yesterday_recap.get('regime', 'unknown')}")
+        append(f"- 涨跌比：{key_metrics.get('up_down_ratio', '-')}")
+        append(f"- 5日均值：{key_metrics.get('ratio_5d_avg', '-')}")
+        append(f"- 涨停 / 跌停 / 炸板：{key_metrics.get('limit_up_count', '-')} / {key_metrics.get('limit_down_count', '-')} / {key_metrics.get('broken_board_count', '-')}")
+        append(f"- 最高连板：{key_metrics.get('max_consecutive_board', '-')}")
+        append(f"- 风格：{key_metrics.get('style_label', '-')}")
+        carry_over_points = yesterday_recap.get("carry_over_points", [])
+        if carry_over_points:
+            append("")
+            append("### 延续观察")
+            append("")
+            append(self._format_lines(carry_over_points))
+        append("")
+        append("## 二、隔夜信息")
+        append("")
+        append(f"- 概要：{overnight_news.get('summary', '暂无夜间信息摘要')}")
+        append("")
+        append("### 重点资讯")
+        append("")
+        highlights = overnight_news.get("highlights", [])
+        if highlights:
+            for item in highlights:
+                title = item.get("title", "未命名新闻")
+                source = item.get("source", "unknown")
+                published_at = item.get("published_at", "")
+                append(f"- {title}（{source}{f' · {published_at}' if published_at else ''}）")
+        else:
+            append("- 暂无夜间信息")
+        append("")
+        for category_key, label in category_labels.items():
+            items = overnight_news.get("categorized", {}).get(category_key, [])
+            if not items:
+                continue
+            append(f"### {label}")
+            append("")
+            for item in items[:8]:
+                title = item.get("title", "未命名新闻")
+                source = item.get("source", "unknown")
+                published_at = item.get("published_at", "")
+                append(f"- {title}（{source}{f' · {published_at}' if published_at else ''}）")
+            append("")
+        append("### 新闻映射板块")
+        append("")
+        sector_rows = [
+            [
+                item.get("sector_name", "-"),
+                item.get("role", "-"),
+                item.get("direction", "-"),
+                str(item.get("matched_count", 0)),
+                item.get("thesis", "-") or "-",
+            ]
+            for item in overnight_news.get("sector_mappings", [])
+        ]
+        append(self._format_table(["板块", "角色", "方向", "匹配条数", "观察理由"], sector_rows))
+        append("")
+        for item in overnight_news.get("sector_mappings", [])[:6]:
+            related_news = item.get("related_news", [])
+            if not related_news:
+                continue
+            append(f"#### {item.get('sector_name', '未命名板块')}")
+            append("")
+            for news in related_news[:5]:
+                aliases = "/".join(news.get("matched_aliases", []))
+                append(f"- {news.get('title', '未命名新闻')}（匹配：{aliases or '-'}；方向：{news.get('direction', '-')}）")
+            append("")
+        append("## 三、今日关注清单")
+        append("")
+        append("### 第一层：市场大势")
+        append("")
+        append(self._format_lines(today_watchlist.get("market_checkpoints", [])))
+        append("")
+        append("### 第二层：重点板块")
+        append("")
+        focus_sector_rows = [
+            [
+                item.get("sector_name", "-"),
+                item.get("role", "-"),
+                item.get("trend_5d", "-"),
+                str(item.get("consistency", "-")),
+                item.get("leader_stock", "-") or "-",
+                item.get("today_observation", "-") or item.get("thesis", "-") or "-",
+            ]
+            for item in today_watchlist.get("focus_sectors", [])
+        ]
+        append(self._format_table(["板块", "分类", "5日趋势", "一致性", "板块优选股", "今日观察要点"], focus_sector_rows))
+        append("")
+        append("### 第三层：持仓健康度")
+        append("")
+        position_rows = [
+            [
+                item.get("name", "-"),
+                item.get("code", "-"),
+                item.get("role", "-"),
+                item.get("theme", "-") or "-",
+                item.get("thesis", "-") or "-",
+                item.get("today_observation", "-") or "-",
+                item.get("risk_note", "-") or "-",
+            ]
+            for item in today_watchlist.get("position_watch", [])
+        ]
+        append(self._format_table(["对象", "代码", "角色", "主题", "核心 thesis", "观察要点", "风险提示"], position_rows))
+        append("")
+        append("## 四、今日操作计划")
+        append("")
+        append(f"- 仓位姿态：{action_frame.get('posture', 'observe')}")
+        append(f"- 关注方向：{self._format_tag_list(action_frame.get('focus_directions', []))}")
+        append(f"- 新闻驱动方向：{self._format_tag_list(action_frame.get('news_focus_sectors', []))}")
+        append(f"- 偏利多方向：{self._format_tag_list(action_frame.get('positive_news_sectors', []))}")
+        append(f"- 偏风险方向：{self._format_tag_list(action_frame.get('risk_news_sectors', []))}")
+        append("- 风险提示：")
+        append(self._format_lines(action_frame.get("risk_warnings", [])))
+        append("")
+        append("- 执行备注：")
+        append(self._format_lines(action_frame.get("notes", [])))
+        append("")
+        append("## 五、关注池")
+        append("")
+        append(f"- 关注板块：{self._format_tag_list(watch_context.get('watch_sectors', []))}")
+        watch_stocks = watch_context.get("watch_stocks", [])
+        open_positions = watch_context.get("open_positions", [])
+        append(
+            f"- 关注股票：{self._format_tag_list([stock.get('name') or stock.get('code', '') for stock in watch_stocks])}"
+        )
+        append(
+            f"- 已开仓对象：{self._format_tag_list([stock.get('name') or stock.get('code', '') for stock in open_positions])}"
+        )
+        append("")
+        append("## 六、预警")
+        append("")
+        if alerts:
+            for item in alerts:
+                append(
+                    f"- [{item.get('urgency', 'medium')}] {item.get('title', '未命名预警')}"
+                    + (f"：{item.get('message')}" if item.get("message") else "")
+                )
+        else:
+            append("- 暂无预警")
+        append("")
+        append("## 七、执行步骤")
+        append("")
+        step_rows = [
+            [step.name, step.status, str(step.records_affected), step.error_message or "-"]
+            for step in steps
+        ]
+        append(self._format_table(["步骤", "状态", "影响记录", "错误"], step_rows))
+        append("")
+        append("## 数据来源")
+        append("")
+        append(self._format_lines([str(item) for item in metadata.get("data_sources", [])]))
+        append("")
+        return "\n".join(lines)
+
+    def _render_post_market_report(self, run: WorkflowRunRecord) -> str:
+        """Render one post-market workflow run as a markdown briefing."""
+        summary = run.summary
+        market_overview = summary.market_overview or {}
+        sector_positioning = summary.sector_positioning or {}
+        position_health = summary.position_health or {}
+        next_day_prep = summary.next_day_prep or {}
+        research_archive = summary.research_archive or {}
+        watch_context = summary.watch_context or {}
+        alerts = summary.alerts or []
+        metadata = summary.metadata or {}
+        steps = summary.steps or []
+        cross_day_review = summary.cross_day_review or {}
+        lines: list[str] = []
+        append = lines.append
+        breadth = market_overview.get("breadth", {})
+        limit_stats = market_overview.get("limit_stats", {})
+        style = market_overview.get("style", {})
+
+        append(f"# {summary.title} — {run.workflow_date}")
+        append("")
+        append("## 元信息")
+        append("")
+        append(f"- workflow_date: **{run.workflow_date}**")
+        append(f"- requested_date: {summary.requested_date or '-'}")
+        append(f"- resolved_date: {summary.resolved_date or '-'}")
+        append(f"- date_resolution: {summary.date_resolution}")
+        append(f"- triggered_by: {run.triggered_by.value}")
+        append(f"- status: {run.status.value}")
+        append(f"- started_at: {run.started_at.isoformat()}")
+        append(f"- finished_at: {run.finished_at.isoformat() if run.finished_at else '-'}")
+        append("")
+        append("## 总览")
+        append("")
+        append(summary.overview)
+        append("")
+        append("## 一、市场大势")
+        append("")
+        append(f"- 摘要：{market_overview.get('summary', '暂无市场大势结论')}")
+        append(f"- 市场状态：{market_overview.get('regime', 'neutral')}")
+        append(f"- 置信度：{market_overview.get('confidence', '-')}")
+        append("")
+        append("### 指数表现")
+        append("")
+        index_rows = [
+            [
+                item.get("name", item.get("code", "-")),
+                str(item.get("close", "-")),
+                str(item.get("pct_change", "-")),
+                str(item.get("amount", "-")),
+            ]
+            for item in market_overview.get("indices", [])
+        ]
+        append(self._format_table(["指数", "收盘", "涨跌幅", "成交额"], index_rows))
+        append("")
+        append("### 市场情绪")
+        append("")
+        append(f"- 上涨 / 下跌家数：{breadth.get('up_count', '-')} / {breadth.get('down_count', '-')}")
+        append(f"- 涨跌比：{breadth.get('up_down_ratio', '-')}")
+        append(f"- 5日涨跌比中枢：{breadth.get('ratio_5d_avg', '-')}")
+        append(f"- 涨停 / 跌停 / 炸板：{limit_stats.get('limit_up_count', '-')} / {limit_stats.get('limit_down_count', '-')} / {limit_stats.get('broken_board_count', '-')}")
+        append(f"- 炸板率：{limit_stats.get('broken_board_rate', '-')}")
+        append(f"- 连板高度：{limit_stats.get('max_consecutive_board', '-')}")
+        append("")
+        append("### 大小盘风格")
+        append("")
+        append(f"- 风格标签：{style.get('style_label', '-')}")
+        append(f"- 沪深300：{style.get('hs300_5d_pct', '-')}")
+        append(f"- 中证1000 / 创业板代理：{style.get('zz1000_5d_pct', '-')}")
+        append(f"- 相对强度：{style.get('relative_strength_5d', '-')}")
+        append("")
+        append("### 风险偏好代理")
+        append("")
+        proxy_rows = [
+            [item.get("name", item.get("code", "-")), str(item.get("pct_change", "-")), item.get("note", "-")]
+            for item in market_overview.get("risk_proxies", [])
+        ]
+        append(self._format_table(["代理", "涨跌幅", "说明"], proxy_rows))
+        append("")
+        append("### 大势判断")
+        append("")
+        append("- 关键结论：")
+        append(self._format_lines(market_overview.get("key_takeaways", [])))
+        append("")
+        append("### 跨日验证（昨日判断 vs 今日结果）")
+        append("")
+        if not cross_day_review.get("available"):
+            append(f"- 不可用：{cross_day_review.get('reason', 'missing_previous_snapshot')}")
+        else:
+            regime_cmp = cross_day_review.get("regime", {})
+            style_cmp = cross_day_review.get("style", {})
+            ratio_cmp = cross_day_review.get("breadth_ratio", {})
+            append(f"- 对照区间：{cross_day_review.get('previous_date', '-')} -> {run.workflow_date}")
+            append(f"- 市场状态：{regime_cmp.get('previous', '-')} -> {regime_cmp.get('today', '-')}" + ("（切换）" if regime_cmp.get("changed") else "（延续）"))
+            append(f"- 风格状态：{style_cmp.get('previous', '-')} -> {style_cmp.get('today', '-')}" + ("（切换）" if style_cmp.get("changed") else "（延续）"))
+            append(f"- 涨跌比：{ratio_cmp.get('previous', '-')} -> {ratio_cmp.get('today', '-')}（Δ {ratio_cmp.get('delta', '-')})")
+            append("")
+            sector_consistency_rows = [
+                [
+                    item.get("name", "-"),
+                    str(item.get("previous", "-")),
+                    str(item.get("today", "-")),
+                    str(item.get("delta", "-")),
+                ]
+                for item in cross_day_review.get("watch_sector_consistency", [])
+            ]
+            append(self._format_table(["观察板块", "昨日一致性", "今日一致性", "变化"], sector_consistency_rows))
+        append("")
+        append("## 二、板块定位")
+        append("")
+        append("### 当日主线")
+        append("")
+        leader_rows = [
+            [item.get("sector_name", "-"), str(item.get("pct_change", "-")), str(item.get("net_flow", "-")), item.get("leader_stock", "-") or "-"]
+            for item in sector_positioning.get("market_leaders", [])
+        ]
+        append(self._format_table(["板块", "涨跌幅", "净流入", "领涨股"], leader_rows))
+        append("")
+        append("### 弱势板块")
+        append("")
+        laggard_rows = [
+            [item.get("sector_name", "-"), str(item.get("pct_change", "-")), str(item.get("net_flow", "-")), item.get("leader_stock", "-") or "-"]
+            for item in sector_positioning.get("market_laggards", [])
+        ]
+        append(self._format_table(["板块", "涨跌幅", "净流入", "领涨股"], laggard_rows))
+        append("")
+        append("### 固定观察池")
+        append("")
+        watch_sector_rows = [
+            [
+                item.get("sector_name", "-"),
+                item.get("role", "-"),
+                item.get("trend_5d", "-"),
+                str(item.get("consistency", "-")),
+                item.get("leader_stock", "-") or "-",
+                item.get("observation_note", "-") or "-",
+            ]
+            for item in sector_positioning.get("watch_sectors", [])
+        ]
+        append(self._format_table(["板块", "分类", "5日趋势", "一致性", "板块优选股", "观察重点"], watch_sector_rows))
+        append("")
+        append("### 观察重点")
+        append("")
+        append(self._format_lines(sector_positioning.get("observation_focus", [])))
+        append("")
+        append("### 行业板块 TOP")
+        append("")
+        industry_top_rows = [
+            [item.get("name", "-"), str(item.get("change_pct", "-")), f"{item.get('up_count', '-')}/{item.get('down_count', '-')}", item.get("leader", "-") or "-"]
+            for item in sector_positioning.get("industry_top", [])
+        ]
+        append(self._format_table(["行业", "涨跌幅", "涨/跌", "领涨股"], industry_top_rows))
+        append("")
+        append("### 行业板块 Bottom")
+        append("")
+        industry_bottom_rows = [
+            [item.get("name", "-"), str(item.get("change_pct", "-")), f"{item.get('up_count', '-')}/{item.get('down_count', '-')}", item.get("leader", "-") or "-"]
+            for item in sector_positioning.get("industry_bottom", [])
+        ]
+        append(self._format_table(["行业", "涨跌幅", "涨/跌", "领涨股"], industry_bottom_rows))
+        append("")
+        append("### 概念板块 TOP")
+        append("")
+        concept_top_rows = [
+            [item.get("name", "-"), str(item.get("change_pct", "-")), f"{item.get('up_count', '-')}/{item.get('down_count', '-')}", item.get("leader", "-") or "-"]
+            for item in sector_positioning.get("concept_top", [])
+        ]
+        append(self._format_table(["概念", "涨跌幅", "涨/跌", "领涨股"], concept_top_rows))
+        append("")
+        append("### 概念板块 Bottom")
+        append("")
+        concept_bottom_rows = [
+            [item.get("name", "-"), str(item.get("change_pct", "-")), f"{item.get('up_count', '-')}/{item.get('down_count', '-')}", item.get("leader", "-") or "-"]
+            for item in sector_positioning.get("concept_bottom", [])
+        ]
+        append(self._format_table(["概念", "涨跌幅", "涨/跌", "领涨股"], concept_bottom_rows))
+        append("")
+        append("## 三、涨停生态")
+        append("")
+        append(f"- 涨停池：**{limit_stats.get('limit_up_count', 0)}** 家")
+        append(f"- 炸板：**{limit_stats.get('broken_board_count', 0)}** 家（炸板率 {limit_stats.get('broken_board_rate', 0)}%）")
+        append(f"- 跌停：**{limit_stats.get('limit_down_count', 0)}** 家")
+        append("")
+        top_consecutive = limit_stats.get("top_consecutive", [])
+        if top_consecutive:
+            append("### 连板梯队")
+            append("")
+            tiers: dict[int, list[dict]] = {}
+            for top in top_consecutive:
+                tiers.setdefault(int(top.get("count", 0)), []).append(top)
+            for count in sorted(tiers.keys(), reverse=True):
+                names = ", ".join(item.get("name", "") for item in tiers[count] if item.get("name"))
+                append(f"- **{count}连板**（{len(tiers[count])}家）：{names}")
+            append("")
+        append("## 四、持仓健康度")
+        append("")
+        append(f"- 总结：{position_health.get('portfolio_health_summary', '暂无')}")
+        append("")
+        append("### 持仓板块健康度")
+        append("")
+        sector_health_rows = [
+            [
+                item.get("sector_name", "-"),
+                item.get("role", "-"),
+                item.get("trend_5d", "-"),
+                str(item.get("consistency", "-")),
+                item.get("status", "-"),
+                item.get("observation_note", "-") or "-",
+            ]
+            for item in position_health.get("sector_health", [])
+        ]
+        append(self._format_table(["板块", "角色", "5日趋势", "一致性", "判断", "说明"], sector_health_rows))
+        append("")
+        append("### 关注个股")
+        append("")
+        tracked_rows = [
+            [
+                item.get("name", "-"),
+                item.get("code", "-"),
+                item.get("role", "-"),
+                item.get("theme", "-") or "-",
+                str(item.get("pct_change", "-")),
+                str(item.get("turnover_rate", "-")),
+                str(item.get("volume_ratio", "-")),
+                item.get("state", "-"),
+                self._format_tag_list(item.get("risk_flags", [])),
+                item.get("observation_note", "-") or item.get("thesis", "-") or "-",
+            ]
+            for item in position_health.get("tracked_items", [])
+        ]
+        append(self._format_table(["股票", "代码", "角色", "主题", "涨跌幅", "换手率", "量比", "状态", "风险标记", "观察要点"], tracked_rows))
+        append("")
+        append("## 五、收盘研报归档")
+        append("")
+        if research_archive.get("available"):
+            append(f"- 时间窗口：**{research_archive.get('begin_date', '-')} → {research_archive.get('end_date', '-')}**")
+            append(f"- 输出根目录：`{research_archive.get('output_root', '-')}`")
+            append(f"- 归档类别：{self._format_tag_list(research_archive.get('categories', []))}")
+            append(f"- 关注行业：{self._format_tag_list(research_archive.get('watch_sectors', []))}")
+            append(f"- 关注个股：{self._format_tag_list(research_archive.get('watch_stocks', []))}")
+            append("- 归档说明：")
+            append(self._format_lines(research_archive.get("notes", [])))
+        else:
+            append(f"- 暂不可用：{research_archive.get('reason', 'unavailable')}")
+        append("")
+        append("## 六、明日准备")
+        append("")
+        append(f"- 市场偏向：{next_day_prep.get('market_bias', 'observe')}")
+        append(f"- 重点方向：{self._format_tag_list(next_day_prep.get('focus_sectors', []))}")
+        append(f"- 重点对象：{self._format_tag_list(next_day_prep.get('focus_items', []))}")
+        append("- 风险提示：")
+        append(self._format_lines(next_day_prep.get("risk_notes", [])))
+        append("")
+        append("- 明日检查项：")
+        append(self._format_lines(next_day_prep.get("tomorrow_checkpoints", [])))
+        append("")
+        append("## 七、关注池")
+        append("")
+        append(f"- 关注板块：{self._format_tag_list(watch_context.get('watch_sectors', []))}")
+        append(
+            f"- 关注股票：{self._format_tag_list([stock.get('name') or stock.get('code', '') for stock in watch_context.get('watch_stocks', [])])}"
+        )
+        append("")
+        append("## 八、预警")
+        append("")
+        if alerts:
+            for item in alerts:
+                append(
+                    f"- [{item.get('urgency', 'medium')}] {item.get('title', '未命名预警')}"
+                    + (f"：{item.get('message')}" if item.get("message") else "")
+                )
+        else:
+            append("- 暂无预警")
+        append("")
+        append("## 九、执行步骤")
+        append("")
+        step_rows = [
+            [step.name, step.status, str(step.records_affected), step.error_message or "-"]
+            for step in steps
+        ]
+        append(self._format_table(["步骤", "状态", "影响记录", "错误"], step_rows))
+        append("")
+        append("## 数据来源")
+        append("")
+        append(self._format_lines([str(item) for item in metadata.get("data_sources", [])]))
+        append("")
+        return "\n".join(lines)
+
+    def _render_briefing_report(self, run: WorkflowRunRecord) -> str:
+        """Render one workflow run into a markdown briefing document."""
+        if run.phase == WorkflowPhase.PRE_MARKET:
+            return self._render_pre_market_report(run)
+        return self._render_post_market_report(run)
+
+    def _export_briefing_report(self, run: WorkflowRunRecord) -> None:
+        """Write one workflow briefing markdown document to the repository briefings directory."""
+        output_dir = self._briefings_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = self._briefing_file_path(run)
+        output_path.write_text(self._render_briefing_report(run), encoding="utf-8")
+
     def _persist_run(
         self,
         workflow_date: str,
@@ -1548,6 +2425,10 @@ class DailyWorkflowService:
                 error_message,
             ],
         )
+        try:
+            self._export_briefing_report(run)
+        except Exception:
+            logger.exception("failed to export workflow briefing markdown")
         return run
 
     def _row_to_run(self, row: tuple) -> WorkflowRunRecord:

@@ -27,13 +27,30 @@ export interface WorkflowStepResult {
 export interface WorkflowRunSummary {
   title: string;
   overview: string;
+  requested_date?: string | null;
+  resolved_date?: string | null;
+  date_resolution?: string;
+  market_overview?: Record<string, any>;
+  sector_positioning?: Record<string, any>;
+  position_health?: Record<string, any>;
+  next_day_prep?: Record<string, any>;
+  yesterday_recap?: Record<string, any>;
+  overnight_news?: Record<string, any>;
+  today_watchlist?: Record<string, any>;
+  action_frame?: Record<string, any>;
   watch_context?: {
     watch_sectors?: string[];
     watch_stocks?: Array<{ code: string; name?: string }>;
     open_positions?: Array<{ code: string; name?: string }>;
   };
   alerts?: any[];
+  metadata?: Record<string, any>;
   steps?: WorkflowStepResult[];
+  watchlist?: Record<string, any>;
+  scan?: Record<string, any>;
+  news?: Record<string, any>;
+  scheduler?: Record<string, any>;
+  carry_over?: Record<string, any>;
 }
 
 export interface WorkflowRun {
