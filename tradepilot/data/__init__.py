@@ -15,6 +15,10 @@ def get_provider() -> DataProvider:
         from tradepilot.data.akshare_provider import AKShareProvider
 
         _provider = AKShareProvider()
+    elif DATA_PROVIDER == DataProviderType.TUSHARE:
+        from tradepilot.data.tushare_provider import TushareProvider
+
+        _provider = TushareProvider()
     elif DATA_PROVIDER == DataProviderType.MOCK:
         from tradepilot.data.mock_provider import MockProvider
 

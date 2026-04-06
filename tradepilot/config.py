@@ -32,10 +32,11 @@ class DataProviderType(StrEnum):
 
     MOCK = "mock"
     AKSHARE = "akshare"
+    TUSHARE = "tushare"
 
 
 DB_PATH = Path(__file__).parent.parent / "data" / "tradepilot.duckdb"
-DATA_PROVIDER = DataProviderType.AKSHARE
+DATA_PROVIDER = DataProviderType.TUSHARE
 DATA_ROOT = Path(__file__).parent.parent / "data"
 BILIBILI_STORAGE_PATH = DATA_ROOT / "bilibili"
 TUSHARE_TOKEN: str | None = _env("TUSHARE_TOKEN")
