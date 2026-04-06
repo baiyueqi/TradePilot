@@ -32,7 +32,20 @@ from tradepilot.workflow.models import (
     WorkflowTrigger,
 )
 
-_DEFAULT_INDEX_CODES = ["000001", "399001", "399006", "000688"]
+_MARKET_REFERENCE_CONFIG = {
+    "core_indices": ["000001", "399001", "399006", "000688"],
+    "style_indices": ["000300", "399006"],
+    "risk_proxy_indices": ["000016", "000300", "399006"],
+    "all_snapshot_indices": ["000001", "399001", "399006", "000688", "000016", "000300"],
+    "index_names": {
+        "000001": "上证指数",
+        "399001": "深证成指",
+        "399006": "创业板指",
+        "000688": "科创50",
+        "000016": "上证50",
+        "000300": "沪深300",
+    },
+}
 
 
 class DailyWorkflowService:
@@ -56,7 +69,7 @@ class DailyWorkflowService:
         error_messages: list[str] = []
         previous_post_market = self.get_latest_run(WorkflowPhase.POST_MARKET)
         alerts = self._scanner.list_alerts(unread_only=False)[:10]
-        watchlist = self._load_watchlist().model_dump()
+        watchlist = self._normalize_watchlist_config(self._load_watchlist())
         news_items: list[dict] = []
 
         watch_context = self._build_watch_context(watchlist)
@@ -123,6 +136,9 @@ class DailyWorkflowService:
             resolved_date,
             date_resolution,
         )
+        overnight_news = self._build_overnight_news(news_step_status, news_items, watch_context)
+        today_watchlist = self._build_today_watchlist(watch_context, alerts, carry_over, overnight_news)
+        action_frame = self._build_action_frame(carry_over, alerts, overnight_news)
         summary = WorkflowSummary(
             title="盘前准备",
             overview=overview,
@@ -130,9 +146,9 @@ class DailyWorkflowService:
             resolved_date=resolved_date,
             date_resolution=date_resolution,
             yesterday_recap=self._build_yesterday_recap(carry_over),
-            overnight_news=self._build_overnight_news(news_step_status, news_items),
-            today_watchlist=self._build_today_watchlist(watch_context, alerts, carry_over),
-            action_frame=self._build_action_frame(carry_over, alerts),
+            overnight_news=overnight_news,
+            today_watchlist=today_watchlist,
+            action_frame=action_frame,
             watch_context=watch_context,
             alerts=alerts[:8],
             metadata={
@@ -171,7 +187,7 @@ class DailyWorkflowService:
         requested_date, resolved_date, date_resolution = self._resolve_post_market_date(workflow_date)
         steps: list[WorkflowStepResult] = []
         error_messages: list[str] = []
-        watchlist = self._load_watchlist().model_dump()
+        watchlist = self._normalize_watchlist_config(self._load_watchlist())
 
         watch_context = self._build_watch_context(watchlist)
 
@@ -557,29 +573,67 @@ class DailyWorkflowService:
             code = str(item.get("code", "")).strip()
             if code and code not in stock_codes:
                 stock_codes.append(code)
+        for item in watchlist.get("position_stocks", []):
+            code = str(item.get("code", "")).strip()
+            if code and code not in stock_codes:
+                stock_codes.append(code)
         for position in self._load_positions():
             code = str(position.get("stock_code", "")).strip()
             if code and code not in stock_codes:
                 stock_codes.append(code)
         if not stock_codes:
             stock_codes = [item.get("code", "") for item in watchlist.get("watch_stocks", []) if item.get("code")]
-        return stock_codes, _DEFAULT_INDEX_CODES.copy()
+        return stock_codes, list(_MARKET_REFERENCE_CONFIG["core_indices"])
 
     def _load_watchlist(self) -> WatchlistConfig:
         return self._summary_api.get_watchlist()
 
-    def _build_watch_context(self, watchlist: dict) -> dict:
+    def _normalize_watchlist_config(self, config: WatchlistConfig) -> dict:
         positions = self._load_positions()
+        normalized = config.model_dump()
+        watch_group = normalized.get("watchlist", {})
+        position_group = normalized.get("positions", {})
         return {
-            "watch_sectors": watchlist.get("watch_sectors", []),
-            "watch_stocks": watchlist.get("watch_stocks", []),
+            "watch_sectors": [item.get("name") for item in watch_group.get("sectors", []) if item.get("name")],
+            "watch_stocks": watch_group.get("stocks", []),
+            "position_sectors": [item.get("name") for item in position_group.get("sectors", []) if item.get("name")],
+            "position_stocks": position_group.get("stocks", []),
+            "positions": position_group,
+            "watchlist": watch_group,
+            "legacy": config.to_legacy_dict(),
             "open_positions": [
                 {
                     "code": position.get("stock_code"),
                     "name": position.get("stock_name"),
+                    "role": "position",
                 }
                 for position in positions
             ],
+        }
+
+    def _build_watch_context(self, watchlist: dict) -> dict:
+        position_group = watchlist.get("positions", {})
+        watch_group = watchlist.get("watchlist", {})
+        return {
+            "watch_sectors": watchlist.get("watch_sectors", []),
+            "watch_stocks": watchlist.get("watch_stocks", []),
+            "position_sectors": watchlist.get("position_sectors", []),
+            "position_stocks": watchlist.get("position_stocks", []),
+            "watchlist_groups": {
+                "positions": position_group,
+                "watchlist": watch_group,
+            },
+            "open_positions": watchlist.get("open_positions", []),
+            "sector_metadata": {
+                item.get("name"): item
+                for item in (watch_group.get("sectors", []) + position_group.get("sectors", []))
+                if item.get("name")
+            },
+            "stock_metadata": {
+                item.get("code"): item
+                for item in (watch_group.get("stocks", []) + position_group.get("stocks", []))
+                if item.get("code")
+            },
         }
 
     def _load_positions(self) -> list[dict]:
@@ -669,7 +723,7 @@ class DailyWorkflowService:
             "carry_over_points": carry_over.get("next_day_prep", {}).get("tomorrow_checkpoints", []),
         }
 
-    def _build_overnight_news(self, news_status: str, news_items: list[dict]) -> dict:
+    def _build_overnight_news(self, news_status: str, news_items: list[dict], watch_context: dict) -> dict:
         highlights = news_items[:5]
         categorized = {
             "macro": [item for item in news_items if item.get("category") == "macro"],
@@ -678,18 +732,23 @@ class DailyWorkflowService:
             "geopolitics": [item for item in news_items if item.get("category") == "geopolitics"],
             "overseas": [item for item in news_items if item.get("category") == "overseas"],
         }
+        sector_mappings = self._build_news_sector_mappings(news_items, watch_context)
         summary = f"夜间信息同步状态：{news_status}；共整理 {len(news_items)} 条信息。"
+        if sector_mappings:
+            summary = f"{summary} 已识别 {len(sector_mappings)} 个相关观察板块。"
         return {
             "summary": summary,
             "status": news_status,
             "highlights": highlights,
             "categorized": categorized,
-            "sector_mappings": [],
+            "sector_mappings": sector_mappings,
         }
 
-    def _build_today_watchlist(self, watch_context: dict, alerts: list[dict], carry_over: dict) -> dict:
+    def _build_today_watchlist(self, watch_context: dict, alerts: list[dict], carry_over: dict, overnight_news: dict | None = None) -> dict:
         watch_sectors = watch_context.get("watch_sectors", [])
         open_positions = watch_context.get("open_positions", [])
+        sector_metadata = watch_context.get("sector_metadata", {})
+        stock_metadata = watch_context.get("stock_metadata", {})
         next_day_prep = carry_over.get("next_day_prep", {}) if carry_over else {}
         sector_positioning = carry_over.get("sector_positioning", {}) if carry_over else {}
         position_health = carry_over.get("position_health", {}) if carry_over else {}
@@ -699,6 +758,9 @@ class DailyWorkflowService:
         tracked_item_map = {
             item.get("code"): item for item in position_health.get("tracked_items", []) if item.get("code")
         }
+        news_sector_map = {
+            item.get("sector_name"): item for item in (overnight_news or {}).get("sector_mappings", []) if item.get("sector_name")
+        }
         market_checkpoints = next_day_prep.get("tomorrow_checkpoints") or [
             "开盘前30分钟涨跌比是否明显强于昨日",
             "成交额节奏是否延续上一交易日风险偏好",
@@ -707,48 +769,163 @@ class DailyWorkflowService:
         focus_sectors = []
         for sector in watch_sectors[:8]:
             matched = watch_sector_map.get(sector, {})
+            meta = sector_metadata.get(sector, {})
+            sector_label = meta.get("name") or sector
+            thesis = meta.get("thesis")
+            news_mapping = news_sector_map.get(sector_label) or news_sector_map.get(sector)
+            news_hint = None
+            if news_mapping:
+                related_news = news_mapping.get("related_news", [])
+                if related_news:
+                    news_hint = f"隔夜新闻触发：{related_news[0].get('title')}"
             focus_sectors.append(
                 {
-                    "sector_name": sector,
-                    "role": matched.get("role", "watch_sector"),
+                    "sector_name": sector_label,
+                    "role": meta.get("role") or matched.get("role", "watch_sector"),
                     "trend_5d": matched.get("trend_5d", "unknown"),
                     "consistency": matched.get("consistency"),
                     "leader_stock": matched.get("leader_stock"),
-                    "today_observation": matched.get("observation_note") or f"观察 {sector} 是否进入今日主线。",
+                    "thesis": thesis,
+                    "news_matched": news_mapping is not None,
+                    "news_direction": news_mapping.get("direction") if news_mapping else None,
+                    "today_observation": news_hint or matched.get("observation_note") or thesis or f"观察 {sector_label} 是否进入今日主线。",
                 }
             )
         position_watch = []
         for item in open_positions[:8]:
             tracked = tracked_item_map.get(item.get("code"), {})
+            meta = stock_metadata.get(item.get("code"), {})
+            label = meta.get("name") or item.get("name") or item.get("code")
             position_watch.append(
                 {
                     "code": item.get("code"),
-                    "name": item.get("name") or item.get("code"),
-                    "role": tracked.get("role", "position"),
+                    "name": label,
+                    "role": meta.get("role") or tracked.get("role", "position"),
                     "cost_price": None,
-                    "today_observation": tracked.get("observation_note") or f"跟踪 {item.get('name') or item.get('code')} 的盘中强弱与量价配合。",
+                    "theme": meta.get("theme"),
+                    "thesis": meta.get("thesis"),
+                    "today_observation": tracked.get("observation_note") or meta.get("notes") or f"跟踪 {label} 的盘中强弱与量价配合。",
                     "risk_note": (tracked.get("risk_flags") or [None])[0],
                 }
             )
+        news_focus = [item.get("sector_name") for item in (overnight_news or {}).get("sector_mappings", []) if item.get("sector_name")]
+        combined_focus = focus_sectors
+        if news_focus:
+            existing = {item.get("sector_name") for item in focus_sectors}
+            for sector_name in news_focus[:5]:
+                if sector_name not in existing:
+                    mapping = next((item for item in (overnight_news or {}).get("sector_mappings", []) if item.get("sector_name") == sector_name), {})
+                    combined_focus.append(
+                        {
+                            "sector_name": sector_name,
+                            "role": "news_mapped_sector",
+                            "trend_5d": "unknown",
+                            "consistency": None,
+                            "leader_stock": None,
+                            "thesis": mapping.get("thesis"),
+                            "news_matched": True,
+                            "news_direction": mapping.get("direction"),
+                            "today_observation": f"隔夜新闻映射到 {sector_name}，观察是否获得竞价或开盘响应。",
+                        }
+                    )
         return {
             "market_checkpoints": market_checkpoints,
-            "focus_sectors": focus_sectors,
+            "focus_sectors": combined_focus,
             "position_watch": position_watch,
             "latest_alerts": alerts[:5],
+            "news_focus_sectors": news_focus[:5],
         }
 
-    def _build_action_frame(self, carry_over: dict, alerts: list[dict]) -> dict:
+    def _build_news_sector_mappings(self, news_items: list[dict], watch_context: dict) -> list[dict]:
+        sector_metadata = watch_context.get("sector_metadata", {})
+        mappings: list[dict] = []
+        for sector_name, meta in sector_metadata.items():
+            aliases = [sector_name, *(meta.get("report_aliases") or [])]
+            related_items = []
+            for item in news_items:
+                title = str(item.get("title") or "")
+                content = str(item.get("content") or "")
+                haystack = f"{title} {content}".lower()
+                matched_aliases = [alias for alias in aliases if alias and alias.lower() in haystack]
+                if matched_aliases:
+                    related_items.append(
+                        {
+                            "title": item.get("title"),
+                            "source": item.get("source"),
+                            "published_at": item.get("published_at"),
+                            "matched_aliases": matched_aliases,
+                            "direction": self._classify_news_direction(title, content),
+                        }
+                    )
+            if related_items:
+                direction = self._aggregate_news_direction(related_items)
+                mappings.append(
+                    {
+                        "sector_name": sector_name,
+                        "role": meta.get("role", "watch_sector"),
+                        "thesis": meta.get("thesis"),
+                        "aliases": aliases,
+                        "matched_count": len(related_items),
+                        "direction": direction,
+                        "related_news": related_items[:5],
+                    }
+                )
+        mappings.sort(key=lambda item: item.get("matched_count", 0), reverse=True)
+        return mappings
+
+    def _classify_news_direction(self, title: str, content: str) -> str:
+        text = f"{title} {content}".lower()
+        positive_keywords = ["增长", "提升", "突破", "落地", "签约", "中标", "超预期", "利好", "创新高", "扩产"]
+        negative_keywords = ["下滑", "回落", "减持", "亏损", "处罚", "风险", "承压", "下修", "暴跌", "收紧"]
+        positive_hits = sum(1 for keyword in positive_keywords if keyword in text)
+        negative_hits = sum(1 for keyword in negative_keywords if keyword in text)
+        if positive_hits and negative_hits:
+            return "mixed"
+        if positive_hits:
+            return "positive"
+        if negative_hits:
+            return "negative"
+        return "neutral"
+
+    def _aggregate_news_direction(self, related_items: list[dict]) -> str:
+        directions = [item.get("direction") for item in related_items]
+        if "positive" in directions and "negative" in directions:
+            return "mixed"
+        if "negative" in directions:
+            return "negative"
+        if "positive" in directions:
+            return "positive"
+        return "neutral"
+
+    def _build_action_frame(self, carry_over: dict, alerts: list[dict], overnight_news: dict | None = None) -> dict:
         next_day_prep = carry_over.get("next_day_prep", {}) if carry_over else {}
         risk_notes = next_day_prep.get("risk_notes") or [item.get("title") for item in alerts[:3] if item.get("title")]
-        focus_directions = next_day_prep.get("focus_sectors", [])
+        focus_directions = list(next_day_prep.get("focus_sectors", []))
+        news_focus = [item.get("sector_name") for item in (overnight_news or {}).get("sector_mappings", []) if item.get("sector_name")]
+        news_risk = [item.get("sector_name") for item in (overnight_news or {}).get("sector_mappings", []) if item.get("direction") == "negative"]
+        news_positive = [item.get("sector_name") for item in (overnight_news or {}).get("sector_mappings", []) if item.get("direction") == "positive"]
+        for sector_name in news_focus[:3]:
+            if sector_name not in focus_directions:
+                focus_directions.append(sector_name)
         notes = next_day_prep.get("tomorrow_checkpoints", [])
+        if news_focus:
+            notes = [*notes, *[f"隔夜新闻涉及 {sector_name}，确认是否获得开盘资金响应。" for sector_name in news_focus[:3]]]
         if not notes and focus_directions:
             notes = [f"重点确认 {item} 是否获得开盘资金响应。" for item in focus_directions[:3]]
+        if news_positive:
+            notes = [*notes, *[f"{sector_name} 存在偏利多新闻，确认是否形成高开高走或资金扩散。" for sector_name in news_positive[:2]]]
+        if news_risk:
+            risk_notes = [*risk_notes, *[f"{sector_name} 存在偏风险新闻，若竞价或开盘承接不足需降低预期。" for sector_name in news_risk[:2]]]
+        elif news_focus:
+            risk_notes = [*risk_notes, *[f"若 {sector_name} 仅有消息催化而无资金承接，避免误判为新主线。" for sector_name in news_focus[:2]]]
         return {
             "posture": next_day_prep.get("market_bias", "observe"),
             "focus_directions": focus_directions,
-            "risk_warnings": risk_notes,
-            "notes": notes,
+            "risk_warnings": risk_notes[:6],
+            "notes": notes[:6],
+            "news_focus_sectors": news_focus[:5],
+            "positive_news_sectors": news_positive[:5],
+            "risk_news_sectors": news_risk[:5],
         }
 
     def _build_market_overview(self, workflow_date: str, steps: list[WorkflowStepResult]) -> dict:
@@ -952,8 +1129,9 @@ class DailyWorkflowService:
         }
 
     def _build_style_snapshot(self, indices: list[dict]) -> dict:
-        hs300_pct = next((item.get("pct_change") for item in indices if item.get("code") == "000300"), None)
-        cyb_pct = next((item.get("pct_change") for item in indices if item.get("code") == "399006"), None)
+        style_indices = _MARKET_REFERENCE_CONFIG["style_indices"]
+        hs300_pct = next((item.get("pct_change") for item in indices if item.get("code") == style_indices[0]), None)
+        cyb_pct = next((item.get("pct_change") for item in indices if item.get("code") == style_indices[1]), None)
         relative_strength = None
         style_label = "unknown"
         if hs300_pct is not None and cyb_pct is not None:
@@ -972,8 +1150,9 @@ class DailyWorkflowService:
         }
 
     def _build_regime(self, indices: list[dict], breadth: dict) -> tuple[str, str]:
-        hs300_pct = next((item.get("pct_change") for item in indices if item.get("code") == "000300"), 0.0) or 0.0
-        cyb_pct = next((item.get("pct_change") for item in indices if item.get("code") == "399006"), 0.0) or 0.0
+        style_indices = _MARKET_REFERENCE_CONFIG["style_indices"]
+        hs300_pct = next((item.get("pct_change") for item in indices if item.get("code") == style_indices[0]), 0.0) or 0.0
+        cyb_pct = next((item.get("pct_change") for item in indices if item.get("code") == style_indices[1]), 0.0) or 0.0
         up_count = breadth.get("up_count") or 0
         down_count = breadth.get("down_count") or 0
         limit_up_count = breadth.get("limit_up_count") or 0
@@ -1004,7 +1183,7 @@ class DailyWorkflowService:
                 "note": "指数风险偏好代理",
             }
             for item in indices
-            if item.get("code") in {"000016", "000300", "399006"}
+            if item.get("code") in set(_MARKET_REFERENCE_CONFIG["risk_proxy_indices"])
         ]
 
     def _build_market_takeaways(
@@ -1042,6 +1221,8 @@ class DailyWorkflowService:
         if not records:
             logger.warning("sector positioning falls back to watchlist-only mode")
 
+        sector_metadata = watch_context.get("sector_metadata", {})
+
         market_leaders = [
             {
                 "sector_name": item.get("sector"),
@@ -1063,17 +1244,21 @@ class DailyWorkflowService:
 
         watch_sector_records: list[dict] = []
         for sector in watch_context.get("watch_sectors", [])[:8]:
-            matched = self._match_watch_sector(records, sector)
+            meta = sector_metadata.get(sector, {})
+            matched = self._match_watch_sector(records, meta)
             change_5d = matched.get("change_5d") if matched else None
             consistency = self._build_sector_consistency(matched)
+            sector_label = meta.get("name") or sector
             watch_sector_records.append(
                 {
-                    "sector_name": sector,
-                    "role": "watch_sector",
+                    "sector_name": sector_label,
+                    "role": meta.get("role", "watch_sector"),
                     "trend_5d": self._trend_from_change(change_5d),
                     "consistency": consistency,
                     "leader_stock": None,
-                    "observation_note": self._build_sector_observation_note(sector, matched),
+                    "thesis": meta.get("thesis"),
+                    "aliases": meta.get("report_aliases", []),
+                    "observation_note": self._build_sector_observation_note(sector_label, matched, meta),
                     "status": self._build_sector_status(matched),
                 }
             )
@@ -1087,17 +1272,24 @@ class DailyWorkflowService:
             ],
         }
 
-    def _match_watch_sector(self, records: list[dict], watch_name: str) -> dict | None:
-        watch_lower = watch_name.lower()
-        for item in records:
-            sector_name = str(item.get("sector") or "")
-            if sector_name == watch_name:
-                return item
-        for item in records:
-            sector_name = str(item.get("sector") or "")
-            sector_lower = sector_name.lower()
-            if watch_lower in sector_lower or sector_lower in watch_lower:
-                return item
+    def _match_watch_sector(self, records: list[dict], sector_meta: dict | str) -> dict | None:
+        if isinstance(sector_meta, str):
+            names = [sector_meta]
+        else:
+            names = [sector_meta.get("name", "")]
+            names.extend(sector_meta.get("report_aliases", []))
+        lowered = [name.lower() for name in names if name]
+        for name in names:
+            for item in records:
+                sector_name = str(item.get("sector") or "")
+                if sector_name == name:
+                    return item
+        for watch_lower in lowered:
+            for item in records:
+                sector_name = str(item.get("sector") or "")
+                sector_lower = sector_name.lower()
+                if watch_lower in sector_lower or sector_lower in watch_lower:
+                    return item
         return None
 
     def _trend_from_change(self, change_5d: float | None) -> str:
@@ -1136,19 +1328,27 @@ class DailyWorkflowService:
             return "weakening"
         return "stable"
 
-    def _build_sector_observation_note(self, sector: str, matched: dict | None) -> str:
+    def _build_sector_observation_note(self, sector: str, matched: dict | None, sector_meta: dict | None = None) -> str:
+        thesis = (sector_meta or {}).get("thesis")
         if matched is None:
+            if thesis:
+                return f"{sector} 暂无已落库行业快照，保持 thesis：{thesis}。"
             return f"{sector} 暂无已落库行业快照，先作为固定观察池保留。"
         change_1d = matched.get("change_1d")
         change_5d = matched.get("change_5d")
+        if thesis:
+            return f"{sector} 当日 {change_1d if change_1d is not None else '-'}%，5日 {change_5d if change_5d is not None else '-'}%；核心 thesis：{thesis}。"
         return f"{sector} 当日 {change_1d if change_1d is not None else '-'}%，5日 {change_5d if change_5d is not None else '-'}%，观察是否保持一致性。"
 
     def _build_position_health(self, workflow_date: str, watch_context: dict) -> dict:
         tracked_items = []
+        stock_metadata = watch_context.get("stock_metadata", {})
         for item in watch_context.get("open_positions", []):
-            tracked_items.append(self._build_tracked_item(workflow_date, item, "position"))
+            enriched = {**stock_metadata.get(item.get("code"), {}), **item}
+            tracked_items.append(self._build_tracked_item(workflow_date, enriched, "position"))
         for item in watch_context.get("watch_stocks", [])[:5]:
-            tracked_items.append(self._build_tracked_item(workflow_date, item, "watch_stock"))
+            enriched = {**stock_metadata.get(item.get("code"), {}), **item}
+            tracked_items.append(self._build_tracked_item(workflow_date, enriched, "watch_stock"))
         return {
             "portfolio_health_summary": f"当前纳入 {len(tracked_items)} 个持仓/观察对象的健康度跟踪。",
             "sector_health": [],
@@ -1163,16 +1363,20 @@ class DailyWorkflowService:
         turnover_rate = snapshot.get("turnover_rate")
         volume_ratio = snapshot.get("volume_ratio")
         state = self._state_from_snapshot(pct_change, volume_ratio)
+        thesis = item.get("thesis")
+        note = item.get("notes")
         return {
             "subject_type": subject_type,
             "code": code,
             "name": name,
-            "role": subject_type,
+            "role": item.get("role", subject_type),
+            "theme": item.get("theme"),
+            "thesis": thesis,
             "pct_change": pct_change,
             "turnover_rate": turnover_rate,
             "volume_ratio": volume_ratio,
             "state": state,
-            "observation_note": self._observation_from_snapshot(name, pct_change, volume_ratio),
+            "observation_note": note or self._observation_from_snapshot(name, pct_change, volume_ratio, thesis),
             "risk_flags": [self._risk_flag_from_state(state)] if self._risk_flag_from_state(state) else [],
         }
 
@@ -1223,15 +1427,16 @@ class DailyWorkflowService:
             return "watch"
         return "neutral"
 
-    def _observation_from_snapshot(self, name: str, pct_change: float | None, volume_ratio: float | None) -> str:
+    def _observation_from_snapshot(self, name: str, pct_change: float | None, volume_ratio: float | None, thesis: str | None = None) -> str:
         _ = volume_ratio
+        thesis_suffix = f"核心 thesis：{thesis}。" if thesis else ""
         if pct_change is None:
-            return f"继续观察 {name} 的强弱变化。"
+            return f"继续观察 {name} 的强弱变化。{thesis_suffix}".strip()
         if pct_change >= 3:
-            return f"{name} 当日明显走强，观察次日是否延续。"
+            return f"{name} 当日明显走强，观察次日是否延续。{thesis_suffix}".strip()
         if pct_change <= -3:
-            return f"{name} 当日明显走弱，优先关注风险演化。"
-        return f"{name} 当日波动有限，继续观察是否出现方向选择。"
+            return f"{name} 当日明显走弱，优先关注风险演化。{thesis_suffix}".strip()
+        return f"{name} 当日波动有限，继续观察是否出现方向选择。{thesis_suffix}".strip()
 
     def _risk_flag_from_state(self, state: str) -> str | None:
         if state == "breakdown":
@@ -1262,12 +1467,7 @@ class DailyWorkflowService:
         }
 
     def _index_name(self, index_code: str | None) -> str:
-        mapping = {
-            "000001": "上证指数",
-            "399001": "深证成指",
-            "399006": "创业板指",
-            "000688": "科创50",
-        }
+        mapping = _MARKET_REFERENCE_CONFIG["index_names"]
         return mapping.get(index_code or "", index_code or "未知指数")
 
     def _build_pre_market_overview(

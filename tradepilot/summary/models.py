@@ -1,6 +1,6 @@
 """Pydantic v2 models for market summary API responses."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 
 class IndexSnapshot(BaseModel):
@@ -106,11 +106,79 @@ class FiveMinBriefResponse(BaseModel):
     alerts: list[str]
 
 
-class WatchlistConfig(BaseModel):
-    """Watchlist configuration for sectors and stocks."""
+class WatchSectorConfig(BaseModel):
+    """Watch sector metadata used by workflow builders and news mapping."""
 
-    watch_sectors: list[str] = []
-    watch_stocks: list[dict] = []
+    name: str
+    role: str = "watch_sector"
+    thesis: str | None = None
+    report_aliases: list[str] = Field(default_factory=list)
+
+
+class WatchStockConfig(BaseModel):
+    """Watch stock metadata used by workflow builders and insight context."""
+
+    code: str
+    name: str | None = None
+    role: str = "watch_stock"
+    theme: str | None = None
+    thesis: str | None = None
+    notes: str | None = None
+
+
+class WatchGroupConfig(BaseModel):
+    """Grouped watch configuration for positions or generic watchlists."""
+
+    sectors: list[WatchSectorConfig] = Field(default_factory=list)
+    stocks: list[WatchStockConfig] = Field(default_factory=list)
+
+
+class WatchlistConfig(BaseModel):
+    """Normalized watchlist configuration with backward-compatible loading."""
+
+    positions: WatchGroupConfig = Field(default_factory=WatchGroupConfig)
+    watchlist: WatchGroupConfig = Field(default_factory=WatchGroupConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_shape(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        if "positions" in data or "watchlist" in data:
+            return data
+
+        watch_sectors = data.get("watch_sectors", []) or []
+        watch_stocks = data.get("watch_stocks", []) or []
+        return {
+            "positions": {"sectors": [], "stocks": []},
+            "watchlist": {
+                "sectors": [
+                    sector if isinstance(sector, dict) else {"name": str(sector)}
+                    for sector in watch_sectors
+                ],
+                "stocks": watch_stocks,
+            },
+        }
+
+    @property
+    def watch_sectors(self) -> list[str]:
+        """Return watch sector names for backward-compatible consumers."""
+
+        return [item.name for item in self.watchlist.sectors]
+
+    @property
+    def watch_stocks(self) -> list[dict]:
+        """Return watch stock records for backward-compatible consumers."""
+
+        return [item.model_dump() for item in self.watchlist.stocks]
+
+    def to_legacy_dict(self) -> dict:
+        """Return the historical flat watchlist shape used by old code paths."""
+
+        return {
+            "watch_sectors": self.watch_sectors,
+            "watch_stocks": self.watch_stocks,
+        }
 
 
 class TradingStatusResponse(BaseModel):

@@ -62,6 +62,28 @@ function stepStatusColor(status?: string) {
   )[status || ""] || "default";
 }
 
+function newsDirectionColor(direction?: string) {
+  return (
+    {
+      positive: "green",
+      mixed: "orange",
+      negative: "red",
+      neutral: "default",
+    } as Record<string, string>
+  )[direction || ""] || "default";
+}
+
+function newsDirectionLabel(direction?: string) {
+  return (
+    {
+      positive: "偏利多",
+      mixed: "待观察",
+      negative: "偏风险",
+      neutral: "中性",
+    } as Record<string, string>
+  )[direction || ""] || "待观察";
+}
+
 function getOverviewText(context: WorkflowContextPayload | null, workflow?: WorkflowRunResponse | null) {
   return context?.metadata?.overview || workflow?.run.summary.overview || workflow?.run.error_message || "暂无摘要";
 }
@@ -334,6 +356,10 @@ export default function Dashboard() {
   const positionHealth = context?.position_health || {};
   const nextDayPrep = context?.next_day_prep || {};
   const newsItems = overnightNews?.highlights || [];
+  const newsSectorMappings = overnightNews?.sector_mappings || [];
+  const newsFocusSectors = todayWatchlist?.news_focus_sectors || actionFrame?.news_focus_sectors || [];
+  const positiveNewsSectors = actionFrame?.positive_news_sectors || [];
+  const riskNewsSectors = actionFrame?.risk_news_sectors || [];
   const trackedItems = positionHealth?.tracked_items || [];
   const watchSectorRecords = sectorPositioning?.watch_sectors || [];
 
@@ -358,22 +384,62 @@ export default function Dashboard() {
           key: "news",
           label: "隔夜信息",
           children: (
-            <List
-              size="small"
-              dataSource={newsItems}
-              locale={{ emptyText: "暂无夜间信息" }}
-              renderItem={(item: any) => (
-                <List.Item>
-                  <div>
-                    <div style={{ fontWeight: 500 }}>{item.title || "未命名新闻"}</div>
-                    <div style={{ fontSize: 12, color: "#666" }}>
-                      {item.source || "unknown"}
-                      {item.published_at ? ` · ${String(item.published_at).slice(0, 16).replace("T", " ")}` : ""}
-                    </div>
-                  </div>
-                </List.Item>
-              )}
-            />
+            <Row gutter={[12, 12]}>
+              <Col xs={24} lg={14}>
+                <Card size="small" title="新闻列表">
+                  <List
+                    size="small"
+                    dataSource={newsItems}
+                    locale={{ emptyText: "暂无夜间信息" }}
+                    renderItem={(item: any) => (
+                      <List.Item>
+                        <div>
+                          <div style={{ fontWeight: 500 }}>{item.title || "未命名新闻"}</div>
+                          <div style={{ fontSize: 12, color: "#666" }}>
+                            {item.source || "unknown"}
+                            {item.published_at ? ` · ${String(item.published_at).slice(0, 16).replace("T", " ")}` : ""}
+                          </div>
+                        </div>
+                      </List.Item>
+                    )}
+                  />
+                </Card>
+              </Col>
+              <Col xs={24} lg={10}>
+                <Card size="small" title="相关观察板块">
+                  <List
+                    size="small"
+                    dataSource={newsSectorMappings}
+                    locale={{ emptyText: "暂无板块映射" }}
+                    renderItem={(item: any) => (
+                      <List.Item>
+                        <div style={{ width: "100%" }}>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                            <Text strong>{item.sector_name}</Text>
+                            {item.role ? <Tag color="blue">{item.role}</Tag> : null}
+                            {item.direction ? <Tag color={newsDirectionColor(item.direction)}>{newsDirectionLabel(item.direction)}</Tag> : null}
+                            {item.matched_count ? <Tag>{item.matched_count} 条</Tag> : null}
+                          </div>
+                          {item.thesis ? <div style={{ marginTop: 4, fontSize: 12, color: "#666" }}>{item.thesis}</div> : null}
+                          {(item.related_news || []).length > 0 ? (
+                            <div style={{ marginTop: 6 }}>
+                              {(item.related_news || []).map((news: any) => (
+                                <div key={`${item.sector_name}-${news.title}`} style={{ fontSize: 12, marginBottom: 4 }}>
+                                  <Text>{news.title}</Text>
+                                  {(news.matched_aliases || []).length > 0 ? (
+                                    <span style={{ color: "#999" }}> · 匹配 {news.matched_aliases.join("/")}</span>
+                                  ) : null}
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      </List.Item>
+                    )}
+                  />
+                </Card>
+              </Col>
+            </Row>
           ),
         },
         {
@@ -394,8 +460,24 @@ export default function Dashboard() {
               <Col xs={24} lg={12}>
                 <Card size="small" title="重点板块">
                   {(todayWatchlist?.focus_sectors || []).length > 0
-                    ? (todayWatchlist.focus_sectors || []).map((item: any) => <Tag key={item.sector_name}>{item.sector_name}</Tag>)
+                    ? (todayWatchlist.focus_sectors || []).map((item: any) => (
+                        <Tag key={item.sector_name} color={item.news_matched ? newsDirectionColor(item.news_direction) || "gold" : undefined}>
+                          {item.sector_name}
+                          {item.news_matched ? ` · ${newsDirectionLabel(item.news_direction)}` : ""}
+                        </Tag>
+                      ))
                     : <Text type="secondary">暂无</Text>}
+                  {newsFocusSectors.length > 0 ? (
+                    <div style={{ marginTop: 8 }}>
+                      <Text type="secondary">隔夜新闻重点映射：</Text>
+                      <div style={{ marginTop: 6 }}>
+                        {newsFocusSectors.map((sector: string) => {
+                          const direction = positiveNewsSectors.includes(sector) ? "positive" : riskNewsSectors.includes(sector) ? "negative" : "mixed";
+                          return <Tag key={`news-${sector}`} color={newsDirectionColor(direction)}>{sector} · {newsDirectionLabel(direction)}</Tag>;
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
                 </Card>
               </Col>
               <Col xs={24}>
@@ -424,7 +506,29 @@ export default function Dashboard() {
                   key: "focus",
                   label: "关注方向",
                   children: (actionFrame?.focus_directions || []).length > 0
-                    ? (actionFrame.focus_directions || []).map((item: string) => <Tag key={item}>{item}</Tag>)
+                    ? (actionFrame.focus_directions || []).map((item: string) => (
+                        <Tag
+                          key={item}
+                          color={
+                            positiveNewsSectors.includes(item)
+                              ? newsDirectionColor("positive")
+                              : riskNewsSectors.includes(item)
+                                ? newsDirectionColor("negative")
+                                : newsFocusSectors.includes(item)
+                                  ? newsDirectionColor("mixed")
+                                  : undefined
+                          }
+                        >
+                          {item}
+                          {positiveNewsSectors.includes(item)
+                            ? " · 偏利多"
+                            : riskNewsSectors.includes(item)
+                              ? " · 偏风险"
+                              : newsFocusSectors.includes(item)
+                                ? " · 待观察"
+                                : ""}
+                        </Tag>
+                      ))
                     : "暂无",
                 },
                 {
@@ -432,6 +536,16 @@ export default function Dashboard() {
                   label: "风险提示",
                   children: (actionFrame?.risk_warnings || []).length > 0
                     ? <List size="small" dataSource={actionFrame.risk_warnings || []} renderItem={(item: string) => <List.Item>{item}</List.Item>} />
+                    : "暂无",
+                },
+                {
+                  key: "news-focus",
+                  label: "新闻驱动方向",
+                  children: newsFocusSectors.length > 0
+                    ? newsFocusSectors.map((item: string) => {
+                        const direction = positiveNewsSectors.includes(item) ? "positive" : riskNewsSectors.includes(item) ? "negative" : "mixed";
+                        return <Tag key={`action-news-${item}`} color={newsDirectionColor(direction)}>{item} · {newsDirectionLabel(direction)}</Tag>;
+                      })
                     : "暂无",
                 },
               ]}
