@@ -1544,7 +1544,7 @@ class DailyWorkflowService:
                 status.value,
                 started_at,
                 finished_at,
-                json.dumps(summary.model_dump(), ensure_ascii=False),
+                json.dumps(summary.model_dump(mode="json"), ensure_ascii=False),
                 error_message,
             ],
         )
